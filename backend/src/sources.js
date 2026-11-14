@@ -247,12 +247,14 @@ async function getQuote(code) {
     for (const ex of ["tse", "otc"]) {
       let j; try { j = await fetchJson(`https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${ex}_${code}.tw&json=1&delay=0`, { timeout: 6000, retries: 0 }); } catch (e) { continue; }
       const m = j && j.msgArray && j.msgArray[0]; if (!m) continue;
+      const day = String(m.d || "").replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3");
       const prev = num(m.y), price = num(m.z) || num((m.b || "").split("_")[0]) || prev; if (!price) continue;
       return {
         code, name: m.n || code, market: ex === "tse" ? "上市" : "上櫃", price, prevClose: prev,
         change: prev ? round(price - prev) : 0, changePct: prev ? round((price / prev - 1) * 100) : 0,
         open: num(m.o), high: num(m.h), low: num(m.l), volume: num(m.v) || 0, // 張
-        limitUp: num(m.u), limitDown: num(m.w), time: (m.d || "") + " " + (m.t || ""), realtime: true,
+        limitUp: num(m.u), limitDown: num(m.w), date: day, time: (day + " " + (m.t || "")).trim(),
+        realtime: day === ymd(taipeiNow()) && (m.t || "") < "13:30:00", // 只有交易日盤中才標示「即時」；收盤後是當日最終價
       };
     }
     return null;

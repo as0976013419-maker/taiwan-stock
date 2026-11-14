@@ -43,8 +43,7 @@ async function build(src, code) {
 
   // 盤中：把即時價併入歷史最後一根，讓指標反映當下
   let h = hasHist ? hist : null;
-  const liveDay = live && live.realtime ? (live.time || "").slice(0, 8).replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3") : "";
-  if (h && liveDay && live.price) h = mergeBar(h, { date: liveDay, price: live.price, open: live.open, high: live.high, low: live.low, volume: live.volume });
+  if (h && live && live.date && live.price) h = mergeBar(h, live);
   else if (h && row) h = mergeBar(h, row);
   const indicators = h ? snapshot(h) : null;
   const chip = ok(rc) && ok(rc).length ? ok(rc) : null, margin = ok(rm) && ok(rm).length ? ok(rm) : null, revenue = ok(rr), per = ok(rp);
