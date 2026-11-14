@@ -15,9 +15,10 @@ function sectorStats(rows) {
     if (a.length < 3) continue;
     const avg = a.reduce((s, r) => s + r.changePct, 0) / a.length, up = a.filter((r) => r.changePct > 0).length / a.length;
     const lus = a.filter((r) => r.prevClose && r.price >= S.limitUpPrice(r.prevClose, false)).length;
-    out.push({ sector, count: a.length, avgChangePct: round(avg), upRatio: round(up), limitUps: lus, heat: Math.round(clamp(50 + avg * 12 + (up - 0.5) * 40 + lus * 3, 0, 100)), members: a });
+    const raw = 50 + avg * 6 + (up - 0.5) * 30 + Math.min(lus, 5); // 實測：大漲日舊係數會讓多數族群同時頂到 100，失去鑑別度
+    out.push({ sector, count: a.length, avgChangePct: round(avg), upRatio: round(up), limitUps: lus, raw, heat: Math.round(clamp(raw, 0, 100)), members: a });
   }
-  out.sort((a, b) => b.heat - a.heat).forEach((s, i) => { s.rank = i + 1; });
+  out.sort((a, b) => b.raw - a.raw).forEach((s, i) => { s.rank = i + 1; });
   return new Map(out.map((s) => [s.sector, s]));
 }
 function universeOf(all, universe) {
@@ -27,8 +28,9 @@ function universeOf(all, universe) {
   return byValue.slice(0, 150); // custom：成交值前 150 的熱門股池
 }
 async function withHistory(src, rows) {
-  const hs = await mapLimit(rows, 5, (r) => src.getHistory(r.code, daysAgo(200)));
-  return rows.map((r, i) => ({ r, ind: hs[i] ? snapshot(hs[i]) : null }));
+  const { mergeBar } = require("./analyze");
+  const hs = await mapLimit(rows, 4, (r) => src.getHistory(r.code, daysAgo(200)));
+  return rows.map((r, i) => ({ r, ind: hs[i] && hs[i].closes.length >= 30 ? snapshot(mergeBar(hs[i], r)) : null }));
 }
 const base = (r) => ({ code: r.code, name: r.name, price: r.price, changePct: pctStr(r.changePct), volume: r.volume, sector: r.industry });
 
@@ -54,15 +56,15 @@ async function compute(src, mode, limit, universe) {
 
   if (mode === "volume" || mode === "change" || mode === "drop") {
     // 漲跌幅排行排除成交量過低者（< 300 張），避免冷門股雜訊
-    const pool = mode === "volume" ? all : all.filter((r) => r.volume >= 300 && !r.isETF);
+    const pool = all.filter((r) => !r.isETF && (mode === "volume" || r.volume >= 300)); // 評分模型針對個股，ETF（含槓反）不列入
     const sorted = pool.slice().sort(mode === "volume" ? (a, b) => b.volume - a.volume : mode === "change" ? (a, b) => b.changePct - a.changePct : (a, b) => a.changePct - b.changePct);
     const rows = await withHistory(src, sorted.slice(0, limit));
-    return { mode, stocks: rows.map(({ r, ind }) => { const sc = scored(r, ind); return Object.assign(base(r), scoreCols(sc), { suggestion: S.suggestionOf(sc, ind) }); }) };
+    return { mode, partial: rows.some((x) => !x.ind), stocks: rows.map(({ r, ind }) => { const sc = scored(r, ind); return Object.assign(base(r), scoreCols(sc), { suggestion: (ind ? "" : "（缺K線，技術面未計分）") + S.suggestionOf(sc, ind) }); }) };
   }
 
   if (mode === "momentum") {
     const pool = universeOf(all, universe).filter((r) => !r.isETF);
-    const pre = pool.map((r) => ({ r, m: S.momentumOf(r, null, { valuePct: valueRank.get(r.code), sector: secOf(r) }).momentumScore })).sort((a, b) => b.m - a.m).slice(0, Math.max(limit * 2, 30));
+    const pre = pool.map((r) => ({ r, m: S.momentumOf(r, null, { valuePct: valueRank.get(r.code), sector: secOf(r) }).momentumScore })).sort((a, b) => b.m - a.m).slice(0, limit + 10);
     const rows = await withHistory(src, pre.map((x) => x.r));
     const out = rows.map(({ r, ind }) => { const m = S.momentumOf(r, ind, { valuePct: valueRank.get(r.code), sector: secOf(r) }), sc = scored(r, ind);
       return Object.assign(base(r), scoreCols(sc), m, { suggestion: m.momentumScore >= 80 ? "動能強，留意是否過熱與隔日量能" : m.momentumScore >= 60 ? "動能偏強，觀察能否續量" : "動能普通" }); });
@@ -75,7 +77,7 @@ async function compute(src, mode, limit, universe) {
       const lu = S.limitUpPrice(r.prevClose, false), locked = r.price >= lu, dist = round(Math.max(0, (lu / r.price - 1) * 100));
       const sec = secOf(r), peers = sec ? sec.limitUps : 0, atHigh = r.high && r.price >= r.high;
       const tags = [];
-      let sc = (locked ? 60 : Math.max(0, 50 - dist * 8)) + (atHigh ? 10 : 0) + Math.round((valueRank.get(r.code) || 0) * 15) + (peers >= 2 ? 15 : peers === 1 && !locked ? 5 : 0);
+      let sc = (locked ? 55 : Math.max(0, 45 - dist * 8)) + (atHigh ? 10 : 0) + (valueRank.get(r.code) || 0) * 20 + Math.min(peers, 5) * 3;
       tags.push(locked ? { cls: "hot", text: "已鎖漲停" } : dist <= 2 ? { cls: "bull", text: "接近漲停" } : { cls: "neutral", text: "漲幅" + r.changePct.toFixed(1) + "%" });
       if (peers >= 2) tags.push({ cls: "bull", text: "族群連動(" + peers + "檔漲停)" });
       if (!atHigh) tags.push({ cls: "warn", text: "未收最高" });

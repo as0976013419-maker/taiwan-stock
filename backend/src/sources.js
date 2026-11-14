@@ -13,6 +13,8 @@ const FINMIND = "https://api.finmindtrade.com/api/v4/data";
 const MIN = 60000, HOUR = 3600000;
 
 const isETF = (code) => /^00/.test(code);
+/** 民國日期 "1151113" → "2026-11-13" */
+const rocDate = (v) => { const m = String(v || "").match(/^(\d{2,3})(\d{2})(\d{2})$/); return m ? (1911 + +m[1]) + "-" + m[2] + "-" + m[3] : String(v || ""); };
 const isCommon = (code) => /^\d{4}$/.test(code) || /^00\d{2,4}[A-Z]?$/.test(code); // 排除權證、特別股以外的雜項
 
 // ── 全市場：行情 ─────────────────────────────────────────────
@@ -30,7 +32,7 @@ async function twseQuotes() {
       price: close, change: round(change), prevClose: round(prev), changePct: prev > 0 ? round(change / prev * 100) : 0,
       open: num(pick(r, ["OpeningPrice", "開盤價"])), high: num(pick(r, ["HighestPrice", "最高價"])), low: num(pick(r, ["LowestPrice", "最低價"])),
       volume: Math.round((num(pick(r, ["TradeVolume", "成交股數"])) || 0) / 1000), // 張
-      value: num(pick(r, ["TradeValue", "成交金額"])) || 0, date: String(pick(r, ["Date"]) || ""),
+      value: num(pick(r, ["TradeValue", "成交金額"])) || 0, date: rocDate(pick(r, ["Date"])),
     });
   }
   return out;
@@ -47,7 +49,7 @@ async function tpexQuotes() {
       price: close, change: round(change), prevClose: round(prev), changePct: prev > 0 ? round(change / prev * 100) : 0,
       open: num(pick(r, ["Open"])), high: num(pick(r, ["High"])), low: num(pick(r, ["Low"])),
       volume: Math.round((num(pick(r, ["TradingShares", "TradeVolume"])) || 0) / 1000),
-      value: num(pick(r, ["TransactionAmount", "TradeValue"])) || 0, date: String(pick(r, ["Date"]) || ""),
+      value: num(pick(r, ["TransactionAmount", "TradeValue"])) || 0, date: rocDate(pick(r, ["Date"])),
     });
   }
   return out;
@@ -112,12 +114,29 @@ async function instMap() {
       }
       break;
     }
+    // 上櫃：TPEx 批次資料（欄位名含空白且不一致，用正則找）
+    try {
+      const rows = await fetchJson(TPEX + "/tpex_3insti_daily_trading");
+      for (const r of rows || []) {
+        const code = String(r.SecuritiesCompanyCode || "").trim(); if (!code) continue;
+        const find = (re) => { for (const k in r) if (re.test(k.replace(/\s/g, ""))) return Math.round((num(r[k]) || 0) / 1000); return 0; };
+        m.set(code, { foreign: find(/^ForeignInvestorsIncludeMainlandAreaInvestors-Difference$/), trust: find(/^SecuritiesInvestmentTrustCompanies-Difference$/), dealer: find(/^Dealers-Difference$/), total: find(/^TotalDifference$/), date: rocDate(r.Date) });
+      }
+    } catch (e) { /* 上櫃法人資料失敗不影響上市 */ }
     return m;
   });
 }
 async function marginMap() {
-  const rows = await cached("twse:margin", 30 * MIN, () => fetchJson(TWSE + "/exchangeReport/MI_MARGN"));
+  const [a, b] = await Promise.allSettled([
+    cached("twse:margin", 30 * MIN, () => fetchJson(TWSE + "/exchangeReport/MI_MARGN")),
+    cached("tpex:margin", 30 * MIN, () => fetchJson(TPEX + "/tpex_mainboard_margin_balance")),
+  ]);
+  const rows = a.status === "fulfilled" ? a.value : [];
   const m = new Map();
+  for (const r of (b.status === "fulfilled" ? b.value : []) || []) {
+    const code = String(r.SecuritiesCompanyCode || "").trim(); if (!code) continue;
+    m.set(code, { bal: num(r.MarginPurchaseBalance), prev: num(r.MarginPurchaseBalancePreviousDay), limit: num(r.MarginPurchaseQuota), shortBal: num(r.ShortSaleBalance), shortPrev: num(r.ShortSaleBalancePreviousDay) });
+  }
   for (const r of rows || []) {
     const code = String(pick(r, ["股票代號", "Code"]) || "").trim(); if (!code) continue;
     m.set(code, {
@@ -151,17 +170,24 @@ async function getMarketSnapshot() {
 }
 
 // ── 個股：FinMind ────────────────────────────────────────────
+let _fmBlockedUntil = 0;
+const finmindLimited = () => Date.now() < _fmBlockedUntil;
 function finmind(dataset, code, start, end) {
+  if (finmindLimited()) return Promise.reject(Object.assign(new Error("FinMind 請求額度已用盡"), { quota: true }));
   const url = `${FINMIND}?dataset=${dataset}&data_id=${encodeURIComponent(code)}&start_date=${start}` + (end ? `&end_date=${end}` : "");
   const headers = process.env.FINMIND_TOKEN ? { Authorization: "Bearer " + process.env.FINMIND_TOKEN } : {};
-  return fetchJson(url, { timeout: 20000, headers }).then((j) => {
+  return fetchJson(url, { timeout: 20000, headers, retries: 0 }).then((j) => {
     if (j && j.status && j.status !== 200) throw new Error("FinMind：" + (j.msg || j.status));
     return (j && j.data) || [];
+  }).catch((e) => {
+    // 免金鑰每小時約 300 次；超過會回 402。熔斷 10 分鐘，期間直接回錯誤、不再打上游。
+    if (/402/.test(e.message) || /upper limit/i.test(e.message)) { _fmBlockedUntil = Date.now() + 10 * MIN; throw Object.assign(new Error("FinMind 請求額度已用盡"), { quota: true }); }
+    throw e;
   });
 }
 /** 日 K：{code,dates,opens,highs,lows,closes,volumes}（volumes 單位：股） */
 async function getHistory(code, start, end) {
-  return cached(`hist:${code}:${start}:${end || ""}`, 30 * MIN, async () => {
+  return cached(`hist:${code}:${start}:${end || ""}`, 6 * HOUR, async () => { // 當日最新一根由呼叫端用快照補上，所以可以快取久一點
     const rows = (await finmind("TaiwanStockPrice", code, start, end)).filter((r) => +r.close > 0).sort((a, b) => a.date.localeCompare(b.date));
     return {
       code, dates: rows.map((r) => r.date),
@@ -172,7 +198,7 @@ async function getHistory(code, start, end) {
 }
 /** 近 N 日三大法人買賣超（張），舊→新 */
 async function getChip(code) {
-  return cached(`chip:${code}`, 30 * MIN, async () => {
+  return cached(`chip:${code}`, 2 * HOUR, async () => {
     const rows = await finmind("TaiwanStockInstitutionalInvestorsBuySell", code, daysAgo(45));
     const by = new Map();
     for (const r of rows) {
@@ -186,7 +212,7 @@ async function getChip(code) {
 }
 /** 近 N 日融資融券餘額（張），舊→新 */
 async function getMargin(code) {
-  return cached(`margin:${code}`, 30 * MIN, async () => {
+  return cached(`margin:${code}`, 2 * HOUR, async () => {
     const rows = await finmind("TaiwanStockMarginPurchaseShortSale", code, daysAgo(45));
     return rows.sort((a, b) => a.date.localeCompare(b.date)).map((r) => ({
       date: r.date, bal: +r.MarginPurchaseTodayBalance || 0, limit: +r.MarginPurchaseLimit || 0, shortBal: +r.ShortSaleTodayBalance || 0,
@@ -250,4 +276,4 @@ async function getDisposition() {
   });
 }
 
-module.exports = { demo: false, getMarketSnapshot, getHistory, getChip, getMargin, getRevenue, getPER, getQuote, getDisposition };
+module.exports = { demo: false, finmindLimited, getMarketSnapshot, getHistory, getChip, getMargin, getRevenue, getPER, getQuote, getDisposition };

@@ -96,7 +96,9 @@ function buildReport(a) {
       Math.sign(sum("foreign", s5)) !== Math.sign(sum("trust", s5)) && sum("foreign", s5) !== 0 && sum("trust", s5) !== 0 ? "外資與投信方向相反，籌碼呈現土洋對作，股價容易陷入區間。" : "外資與投信方向一致，籌碼面訊號較單純。",
     ]);
   } else {
-    sec("籌碼分析", ["三大法人資料暫時無法取得。"]); sec("籌碼屬性分析", ["無資料。"]); sec("法人分析", ["無資料。"]);
+    const t = a.instToday;
+    sec("籌碼分析", t ? ["歷史序列暫時無法取得，以下僅為最近一個交易日的數字：", "| 法人 | 買賣超（張） |", "|---|---|", `| 外資 | ${sgn(t.foreign)} |`, `| 投信 | ${sgn(t.trust)} |`, `| 自營商 | ${sgn(t.dealer)} |`, `| 合計 | ${sgn(t.total)} |`] : ["三大法人資料暫時無法取得。"]);
+    sec("籌碼屬性分析", ["需要多日序列才能判斷連續性，目前無資料。"]); sec("法人分析", [t ? `單日合計${t.total >= 0 ? "買超" : "賣超"} ${f(Math.abs(t.total), 0)} 張；單日數字不足以判斷趨勢。` : "無資料。"]);
   }
   if (margin && margin.length >= 2) {
     const m = margin[margin.length - 1], p = margin[Math.max(0, margin.length - 6)], use = m.limit > 0 ? m.bal / m.limit * 100 : null;
@@ -106,6 +108,9 @@ function buildReport(a) {
       has ? (m.bal < p.bal && i.ret5 >= 0 ? "融資減、股價不跌：籌碼由散戶流向較穩定的持有者，屬於健康的去槓桿。" : m.bal > p.bal && i.ret5 < 0 ? "融資增、股價跌：散戶逆勢加碼，若續跌會累積賣壓。" : "融資與股價變化沒有出現明顯背離。") : "",
       m.bal > 0 ? `券資比 ${f(m.shortBal / m.bal * 100, 1)}%。` : "",
     ]);
+  } else if (a.marginToday && a.marginToday.bal !== null) {
+    const m = a.marginToday, use = m.limit > 0 ? m.bal / m.limit * 100 : null;
+    sec("融資融券分析", [`融資餘額 ${f(m.bal, 0)} 張（前一日 ${f(m.prev, 0)} 張）；融券餘額 ${f(m.shortBal, 0)} 張。`, use !== null ? `融資使用率 ${f(use, 1)}%。` : "", "多日序列暫時無法取得，僅顯示最近一個交易日。"]);
   } else sec("融資融券分析", [etf ? "此標的無個股融資融券評分資料。" : "融資融券資料暫時無法取得（或該股無信用交易資格）。"]);
 
   // 基本面
