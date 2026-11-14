@@ -3,6 +3,7 @@ services:
   - type: web
     name: taiwan-stock
     runtime: node
+    plan: free          # 免費方案：15 分鐘無流量會休眠，下次開啟需等約 30～60 秒喚醒
     rootDir: backend
     buildCommand: npm ci --omit=dev
     startCommand: node server.js
