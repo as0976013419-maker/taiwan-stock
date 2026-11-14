@@ -1,5 +1,5 @@
 "use strict";
-// 偷吃你財 — 後端伺服器（零框架，Node 18+ 內建 http / fetch）
+// Yoe 台股分析 — 後端伺服器（零框架，Node 18+ 內建 http / fetch）
 //   GET  /health              健康檢查（也用來喚醒免費方案的休眠主機）
 //   GET  /search?q=           代號／名稱自動補全
 //   GET  /scan?mode=&limit=&universe=   七種掃描
@@ -129,5 +129,5 @@ const server = http.createServer(async (req, res) => {
   }
 });
 server.requestTimeout = 90000;
-if (require.main === module) server.listen(PORT, () => console.log(`[偷吃你財] http://localhost:${PORT}  demo=${DEMO} ai=${ai.enabled()} static=${STATIC}`));
+if (require.main === module) server.listen(PORT, () => console.log(`[yoe-stock] http://localhost:${PORT}  demo=${DEMO} ai=${ai.enabled()} static=${STATIC}`));
 module.exports = { server, search };

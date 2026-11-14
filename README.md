@@ -1,4 +1,4 @@
-# 偷吃你財 v5 — 台股個股分析＋回測（完整重建版）
+# Yoe 台股個股分析＋回測
 
 以 [taiwan-stock.netlify.app](https://taiwan-stock.netlify.app/) 為藍本重建的完整專案：前端兩頁 + 全新撰寫的後端。
 建構歷程見 [`docs/HISTORY.md`](docs/HISTORY.md)。
