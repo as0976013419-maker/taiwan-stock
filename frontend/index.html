@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-TW" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>偷吃你財｜台股個股分析</title>
+<meta name="description" content="輸入台股代號，取得即時行情、六面向綜合評分、籌碼與技術分析報告，並可進行策略回測。">
+<link rel="icon" href="/favicon.ico">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/main.css">
+<script>(function(){try{var t=localStorage.getItem("theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
+</head>
+<body>
+<div class="demo-banner" id="demoBanner">⚠ 示範資料模式：畫面上的數字為程式產生的假資料，並非真實行情</div>
+<header class="hdr">
+  <div class="hdr-inner">
+    <a class="logo" href="/" style="display:flex;align-items:center;gap:8px;text-decoration:none"><img src="/assets/logo.jpg" alt="" style="height:30px;width:30px;object-fit:contain;border-radius:4px"><span>偷吃你財</span></a>
+    <div class="search-wrap">
+      <input class="search-input" id="inp" placeholder="輸入代號或名稱，如 2330 / 台積電" maxlength="20" autocomplete="off" aria-label="股票代號或名稱">
+      <div class="ac-list" id="acList"></div>
+    </div>
+    <button class="btn-primary" id="sbtn">分析</button>
+    <div class="hdr-right">
+      <a class="btn-scan" href="/backtest" style="text-decoration:none;border-color:rgba(59,130,246,.4);color:var(--accent2)">回測系統</a>
+      <button class="btn-scan" id="scanOpenBtn" onclick="toggleScan()">熱門掃描</button>
+      <button class="btn-icon" id="themeBtn" onclick="toggleTheme()" title="切換主題" aria-label="切換主題">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" id="themeIcon"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      </button>
+    </div>
+  </div>
+</header>
+<div class="hots-bar"><div class="hots-inner" id="hots"></div></div>
+<div class="scan-panel" id="scanPanel">
+  <div class="scan-inner">
+    <div class="scan-controls">
+      <button class="mode-chip on" id="modeVol" onclick="setMode('volume')">📊 成交量排行</button>
+      <button class="mode-chip" id="modeChg" onclick="setMode('change')">📈 漲幅排行</button>
+      <button class="mode-chip" id="modeDrop" onclick="setMode('drop')">📉 跌幅排行</button>
+      <button class="mode-chip" id="modeMom" onclick="setMode('momentum')">🔥 動能排行</button>
+      <button class="mode-chip" id="modeSector" onclick="setMode('sector')">🏭 族群熱度</button>
+      <button class="mode-chip" id="modeLimitup" onclick="setMode('limitup')">🔒 鎖漲停</button>
+      <button class="mode-chip" id="modeDisposition" onclick="setMode('disposition')">⚠️ 處置股</button>
+      <select class="scan-select" id="scanUniverse" style="display:none" aria-label="掃描範圍">
+        <option value="custom">熱門股池（成交值前150）</option>
+        <option value="large">大型股票池（~800檔）</option>
+        <option value="all">全市場（~1700檔）</option>
+      </select>
+      <div class="scan-n-wrap">前 <input type="number" id="scanN" value="20" min="5" max="30"> 名</div>
+      <button class="btn-primary" id="scanRunBtn" onclick="runScan()" style="margin-left:auto;font-size:11px;padding:7px 14px">開始掃描</button>
+    </div>
+    <div id="scanResult"></div>
+  </div>
+</div>
+<div class="main">
+  <div class="err-box" id="errbox"></div>
+  <div class="welcome" id="welcome">
+    <div class="welcome-logo"><img src="/assets/logo.jpg" alt=""><span>偷吃你財</span></div>
+    <div class="welcome-sub">輸入任意台股代號，即時抓取資料<br>生成完整專業分析報告</div>
+    <div class="welcome-grid" id="wbtns"></div>
+  </div>
+  <div class="loader" id="loader">
+    <div class="spinner"></div>
+    <div class="loader-steps">
+      <div class="loader-step active" id="st1"><div class="step-dot"></div><span>抓取即時資料...</span></div>
+      <div class="loader-step" id="st2"><div class="step-dot"></div><span>計算技術指標...</span></div>
+      <div class="loader-step" id="st3"><div class="step-dot"></div><span>生成分析報告...</span></div>
+    </div>
+  </div>
+  <div id="result"></div>
+</div>
+<footer class="site-footer">資料來源：臺灣證券交易所、證券櫃檯買賣中心、FinMind。本站內容僅供研究參考，不構成任何投資建議。</footer>
+<div class="pdf-btn-float" id="pdfBar"><button onclick="downloadPDF()">下載 PDF 報告</button></div>
+<script src="/js/config.js"></script>
+<script src="/js/app.js"></script>
+</body>
+</html>

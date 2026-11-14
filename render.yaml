@@ -1,0 +1,18 @@
+# Render Blueprint：一個 Web Service 同時提供 API 與前端（方案 A，最簡單）
+services:
+  - type: web
+    name: taiwan-stock
+    runtime: node
+    rootDir: backend
+    buildCommand: npm ci --omit=dev
+    startCommand: node server.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: ANTHROPIC_API_KEY   # 選填：設定後啟用 AI 深度報告
+        sync: false
+      - key: FINMIND_TOKEN       # 選填：提高 FinMind 請求額度
+        sync: false
+      - key: ALLOWED_ORIGINS     # 前後端分離時填前端網址，例如 https://xxx.netlify.app
+        value: "*"

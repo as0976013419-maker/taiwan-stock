@@ -1,0 +1,16 @@
+# 方案 B（前後端分離）用：前端靜態檔放 Netlify，後端另外部署（見 render.yaml）
+# 記得先把 frontend/js/config.js 的 API_BASE 改成後端網址。
+[build]
+  publish = "frontend"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "SAMEORIGIN"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+
+[[headers]]
+  for = "/js/*"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
