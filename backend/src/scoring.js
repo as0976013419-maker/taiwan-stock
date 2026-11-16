@@ -55,7 +55,8 @@ function scoreStock(x) {
     tech += pts("breakout", ind.close >= ind.hi20prev ? 5 : 0);
     vol += (ind.upVolAvg === null || ind.dnVolAvg === null) ? na("up_vol") : pts("up_vol", ind.upVolAvg > ind.dnVolAvg ? 5 : 0);
     // 回檔量縮：今日收黑且量低於 20 日均量；今日收紅則看近 10 日下跌日均量是否低於均量
-    const pullbackQuiet = ind.close < ind.prevClose ? ind.vol < ind.vma20 : (ind.dnVolAvg !== null && ind.dnVolAvg < ind.vma20);
+    const dayDown = ind.volPartial ? ind.volDayDown : ind.close < ind.prevClose; // 盤中時量能取自前一完整交易日，漲跌方向也要用同一天
+    const pullbackQuiet = dayDown ? ind.vol < ind.vma20 : (ind.dnVolAvg !== null && ind.dnVolAvg < ind.vma20);
     vol += ind.vma20 === null ? na("down_vol") : pts("down_vol", pullbackQuiet ? 5 : 0);
     vol += ind.vma20 === null ? na("vol_above_avg") : pts("vol_above_avg", ind.vol > ind.vma20 ? 5 : 0);
   } else { ["above_ma20", "ma20_up", "ma60_up", "ma_bull", "breakout", "up_vol", "down_vol", "vol_above_avg"].forEach(na); }

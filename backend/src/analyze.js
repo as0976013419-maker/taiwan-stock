@@ -47,7 +47,15 @@ async function build(src, code) {
   let h = hasHist ? hist : null;
   if (h && live && live.date && live.price) h = mergeBar(h, live);
   else if (h && row) h = mergeBar(h, row);
-  const indicators = h ? snapshot(h) : null;
+  // 價格還原：hp＝只還原股數變動（價位計算用）、ht＝再還原現金股利（報酬統計用）
+  const adj = h ? Q.adjustPrices(h, ok(rd) && ok(rd).events) : null, hp = adj ? adj.price : null, ht = adj ? adj.total : null;
+  const intraday = !!quote.realtime;
+  const indicators = hp ? snapshot(hp) : null;
+  if (indicators && intraday && hp.closes.length > 31) {
+    // 盤中的成交量只累計到當下，不能和「完整交易日」的均量相比 → 量能欄位改用前一個完整交易日
+    const cut = (x) => x.slice(0, -1), prev = snapshot({ dates: cut(hp.dates), opens: cut(hp.opens), highs: cut(hp.highs), lows: cut(hp.lows), closes: cut(hp.closes), volumes: cut(hp.volumes) });
+    if (prev) Object.assign(indicators, { vol: prev.vol, vma5: prev.vma5, vma20: prev.vma20, volRatio: prev.volRatio, upVolAvg: prev.upVolAvg, dnVolAvg: prev.dnVolAvg, volPartial: true, volAsOf: hp.dates[hp.dates.length - 2], volDayDown: prev.close < prev.prevClose });
+  }
   const chip = ok(rc) && ok(rc).length ? ok(rc) : null, margin = ok(rm) && ok(rm).length ? ok(rm) : null, revenue = ok(rr), per = ok(rp);
   const fin = ok(rf), bal = ok(rb), dividends = ok(rd), holding = ok(rho), news = ok(rn) || [], index = ok(ri) && ok(ri).closes && ok(ri).closes.length > 60 ? ok(ri) : null;
   const fundamentals = {
@@ -55,6 +63,12 @@ async function build(src, code) {
     revYoY: revenue && revenue.yoy !== null ? revenue.yoy : (row ? row.revYoY : null), revMoM: revenue && revenue.mom !== null ? revenue.mom : (row ? row.revMoM : null),
   };
   if (quote.isETF) { fundamentals.pe = fundamentals.pb = fundamentals.revYoY = fundamentals.revMoM = null; }
+  // 官方本益比／淨值比／殖利率是以「快照當日收盤價」計算；報價較新時依價格等比例換算（EPS、淨值、股利不變，換算是精確的）
+  if (row && row.pe && row.price > 0 && quote.price > 0 && Math.abs(quote.price / row.price - 1) > 1e-9 && (row.pe || row.pb)) {
+    const k = quote.price / row.price;
+    if (fundamentals.pe === row.pe) fundamentals.pe = round(row.pe * k); if (fundamentals.pb === row.pb) fundamentals.pb = round(row.pb * k); if (fundamentals.yield === row.yield && row.yield) fundamentals.yield = round(row.yield / k);
+    fundamentals.valuationBase = { date: row.date, price: row.price, pe: row.pe, pb: row.pb, yield: row.yield };
+  }
   // 財報衍生：近四季 EPS、單季 EPS 年增、實際 ROE、毛利率變化、負債比
   if (fin && fin.length) {
     const L = fin[fin.length - 1], Y = fin.length >= 5 ? fin[fin.length - 5] : null, last4 = fin.slice(-4), prev4 = fin.length >= 8 ? fin.slice(-8, -4) : null, sum = (a, k) => a.every((x) => x[k] !== null) ? a.reduce((t, x) => t + x[k], 0) : null;
@@ -77,8 +91,8 @@ async function build(src, code) {
 
   const scored = scoreStock({ snap: Object.assign({}, row || {}, { isETF: quote.isETF }), ind: indicators, chip, margin, fund: fundamentals, sector, holding });
   // 量化模組
-  const rs2 = h ? Q.relStrength(h, index) : null;
-  const quant = h ? { risk: Q.riskMetrics(h, index), rs: rs2, trend: Q.trendTemplate(h, rs2), turtle: Q.turtle(h), events: Q.eventStudy(h), factors: Q.factors(h) } : null;
+  const rs2 = hp ? Q.relStrength(hp, index, ht) : null;
+  const quant = hp ? { risk: Q.riskMetrics(ht, index), rs: rs2, trend: Q.trendTemplate(hp, rs2), turtle: Q.turtle(hp), events: Q.eventStudy(ht), factors: Q.factors(ht) } : null;
   let market = null; // 大盤狀態（順勢交易的前提）
   if (index) { const ic = index.closes, m = (p) => (ic.length >= p ? ic.slice(-p).reduce((a, x) => a + x, 0) / p : null), last = ic[ic.length - 1];
     market = { date: index.dates[index.dates.length - 1], close: round(last), ma50: round(m(50)), ma200: round(m(200)), above50: m(50) !== null && last > m(50), above200: m(200) !== null && last > m(200), ret20: round((last / ic[ic.length - 21] - 1) * 100), ret60: round((last / ic[ic.length - 61] - 1) * 100) }; }
@@ -87,11 +101,14 @@ async function build(src, code) {
   if (!etfCode) { if (!fin) missing.push("季財報"); if (!bal) missing.push("資產負債表"); if (!per) missing.push("歷史估值"); }
   if (!holding) missing.push("外資持股"); if (!index) missing.push("大盤指數");
   if (!indicators) missing.push("歷史K線"); if (!chip) missing.push(row && row.inst ? "三大法人歷史（僅有當日）" : "三大法人"); if (!margin && !quote.isETF) missing.push("融資融券"); if (!revenue && !quote.isETF && fundamentals.revYoY === null) missing.push("月營收");
-  const out = { code, quote, indicators, chip, margin, fundamentals, revenue, sector, scored, missing, instToday: row ? row.inst : null, marginToday: row ? row.margin : null,
+  const out = { code, quote, indicators, chip, margin, fundamentals, revenue, sector, scored, missing, instToday: row ? row.inst : null, marginToday: row ? row.margin : null, intraday,
+    adjust: adj ? { splits: adj.splits, dividendsApplied: adj.dividendsApplied } : null,
+    asOf: { quote: quote.time || quote.date || null, snapshot: row ? row.date : null, kline: h ? h.dates[h.dates.length - 1] : null, chip: chip ? chip[chip.length - 1].date : null, margin: margin ? margin[margin.length - 1].date : null,
+      revenue: revenue ? revenue.ym : null, financials: fin && fin.length ? fin[fin.length - 1].label : null, holding: holding ? holding.date : null, index: index ? index.dates[index.dates.length - 1] : null },
     financials: fin, balance: bal, dividends, holding, news, quant, market, coverage: { got: [snapAll, hist, chip, margin, etfCode || revenue, etfCode || per, etfCode || fin, etfCode || bal, dividends, holding, index].filter(Boolean).length, total: 11 }, _v: VERSION, demo: !!src.demo,
     history: h ? h.dates.slice(-60).map((d, k) => { const j = h.dates.length - Math.min(60, h.dates.length) + k; return { date: d, open: h.opens[j], high: h.highs[j], low: h.lows[j], close: h.closes[j], volume: h.volumes[j] }; }) : [] };
   const rep = buildReport(out);
-  out.text = rep.text; out.stance = rep.stance; out.tags = rep.tags;
+  out.text = rep.text; out.stance = rep.stance; out.tags = rep.tags; out.horizons = rep.horizons;
   return out;
 }
 /** 把「今天」的行情併入歷史最後一根（歷史快取較久，最新一根以快照／即時報價為準） */

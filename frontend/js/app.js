@@ -42,7 +42,7 @@ function loadHotStocks() {
   var timer = setTimeout(function() { if (controller) { controller.abort(); controller = null; } }, 12000); // 12s timeout
   var opts = controller ? { signal: controller.signal } : {};
 
-  fetch(window.RENDER_URL + "/scan?mode=volume&limit=10", opts)
+  fetch(window.RENDER_URL + "/scan?mode=volume&limit=10&lite=1", opts) // lite：只要排行，不觸發個股評分
     .then(function(r) { return r.ok ? r.json() : Promise.reject(r.status); })
     .then(function(data) {
       clearTimeout(timer);
@@ -481,6 +481,8 @@ function doSearch(code) {
   };
   if (_analyzeController) analyzeOpts.signal = _analyzeController.signal;
 
+  // 按下分析後，取消還在排隊的自動補全（否則報告出來後下拉選單才跳出來，還多打一次 API）
+  clearTimeout(acTimer); if (acController) { try { acController.abort(); } catch(e) {} acController = null; } hideAC();
   document.getElementById("welcome").style.display = "none";
   document.getElementById("errbox").style.display = "none";
   document.getElementById("result").innerHTML = "";
@@ -659,6 +661,54 @@ function downloadPDF() {
   }, 1000);
 }
 
+// 短／中／長線各自的判斷（點開可看支持與相反的證據）
+function horizonHTML(hs) {
+  if (!hs || !hs.length) return "";
+  var CLS = {"偏多":"hz-bull", "偏空":"hz-bear", "中性":"hz-neut", "資料不足":"hz-na"};
+  return '<div class="hz-row">' + hs.map(function(h) {
+    return '<details class="hz ' + (CLS[h.view] || "hz-na") + '"><summary><span class="hz-name">' + esc(h.name) + '<small>' + esc(h.span) + '</small></span><span class="hz-view">' + esc(h.view) + '</span></summary>'
+      + '<div class="hz-body"><div><b>支持</b>' + (h.pros.length ? h.pros.map(function(x) { return '<span>' + esc(x) + '</span>'; }).join("") : '<span class="hz-none">無</span>') + '</div>'
+      + '<div><b>相反</b>' + (h.cons.length ? h.cons.map(function(x) { return '<span>' + esc(x) + '</span>'; }).join("") : '<span class="hz-none">無</span>') + '</div></div></details>';
+  }).join("") + '</div>';
+}
+// 關鍵數字列：最常被查的數字固定放在最上面，每格都帶單位或基準日
+function kpiHTML(d) {
+  var fu = d.fundamentals || {}, ind = d.indicators || {}, r = (d.quant && d.quant.risk) || {}, hold = d.holding || {}, chip = d.chip || [];
+  function num(v, dg) { return (v === null || v === undefined || !isFinite(v)) ? "—" : Number(v).toLocaleString("en-US", {maximumFractionDigits: dg === undefined ? 2 : dg}); }
+  function sg(v, dg, unit) { return (v === null || v === undefined || !isFinite(v)) ? "—" : (v > 0 ? "+" : "") + num(v, dg) + (unit || ""); }
+  var c5 = chip.length ? chip.slice(-5).reduce(function(s, x) { return s + x.total; }, 0) : null;
+  var items = [
+    ["本益比", num(fu.pe, 1) + (fu.pe ? " 倍" : ""), fu.own && fu.own.pePct !== null ? "自身五年第 " + fu.own.pePct + " 百分位" : ""],
+    ["近四季 EPS", num(fu.epsTTM) + (fu.epsTTM ? " 元" : ""), fu.epsTTMYoY !== null && fu.epsTTMYoY !== undefined ? "年增 " + sg(fu.epsTTMYoY, 1, "%") : ""],
+    ["月營收年增", sg(fu.revYoY, 1, "%"), d.asOf && d.asOf.revenue ? d.asOf.revenue : ""],
+    ["ROE", fu.roe !== null && fu.roe !== undefined ? num(fu.roe, 1) + "%" : "—", d.asOf && d.asOf.financials ? "截至 " + d.asOf.financials : ""],
+    ["法人近 5 日", c5 === null ? "—" : sg(c5, 0, " 張"), d.asOf && d.asOf.chip ? "至 " + d.asOf.chip : ""],
+    ["外資持股", hold.ratio ? num(hold.ratio, 2) + "%" : "—", hold.ratio && isFinite(hold.ratio20) ? "20 日 " + sg(hold.ratio - hold.ratio20, 2, " 個百分點") : ""],
+    ["日均波幅 ATR", r.atrPct ? num(r.atrPct, 2) + "%" : "—", r.atr14 ? "約 " + num(r.atr14) + " 元" : ""],
+    ["Beta", num(r.beta), r.vol60 ? "年化波動 " + num(r.vol60, 1) + "%" : ""],
+    ["52 週位置", ind.pos240 !== null && ind.pos240 !== undefined ? num(ind.pos240, 0) + "%" : "—", ind.lo240 ? num(ind.lo240) + " ~ " + num(ind.hi240) : ""]
+  ];
+  return '<div class="kpi-row">' + items.map(function(k) { return '<div class="kpi"><div class="kpi-l">' + k[0] + '</div><div class="kpi-v">' + esc(k[1]) + '</div><div class="kpi-s">' + esc(k[2]) + '</div></div>'; }).join("") + '</div>';
+}
+var GLOSSARY_HTML = '<details class="card glossary"><summary>名詞解釋（點開）</summary><dl>'
+  + [["ATR（平均真實波幅）","近 14 日平均每天的高低震盪幅度（含跳空）。用來衡量「正常一天會動多少」，停損設在 1 倍 ATR 以內很容易被正常波動掃到。"],
+     ["Beta","個股相對大盤的敏感度。1.5 代表大盤漲跌 1% 時，這檔股票平均動 1.5%。以近一年日報酬計算。"],
+     ["年化波動率","日報酬標準差換算成一年的幅度。30% 大約代表一年內有三分之二的機率漲跌在 ±30% 以內。"],
+     ["VaR 95%","依過去一年的實際日報酬，有 95% 的交易日跌幅不會超過這個數字；另外 5% 的日子會更糟。"],
+     ["最大回撤","期間內從最高點跌到最低點的最大幅度，代表「最壞時買在高點會虧多少」。"],
+     ["夏普比率","每承擔一單位波動換到多少報酬，越高越好；本站以無風險利率 0 計算。"],
+     ["百分位","把一群數字由小排到大後所在的位置。第 80 百分位＝比 80% 的對象高。"],
+     ["含息／不含息","不含息只看股價變化；含息把領到的現金股利加回去，才是持有人實際的報酬。"],
+     ["還原權息","除息、配股或分割當天股價會被動下調，還原是把歷史價格等比例調整，避免把除息誤判成下跌。"],
+     ["趨勢模板","以 50／150／200 日均線的排列與股價相對一年高低點的位置，檢查是否處於上升趨勢的八項條件。"],
+     ["四階段","打底→上升→做頭→下降。以 150 日均線的方向和股價在均線上或下來判定。"],
+     ["海龜通道","突破 N 日最高價進場、跌破 N 日最低價出場的順勢規則；N 值為 20 日 ATR。"],
+     ["獨立樣本","持有期間互不重疊的訊號次數。連續幾天重複觸發只算一次。"],
+     ["證據強度","訊號後的平均報酬與「任意一天買進」相比是否有統計上的差異。樣本不足或無法區分時，不應把該訊號當成依據。"],
+     ["券資比","融券餘額 ÷ 融資餘額。偏高時若股價上漲，放空者回補可能推升股價（軋空）。"],
+     ["PEG","本益比 ÷ EPS 年增率，用來衡量成長是否已反映在股價上。"]]
+    .map(function(g) { return '<dt>' + g[0] + '</dt><dd>' + g[1] + '</dd>'; }).join("") + '</dl></details>';
+
 // 渲染報告
 function renderReport(code, text, scored, data, isAI) {
   data = data || {}; var q = data.quote || null;
@@ -827,6 +877,8 @@ function renderReport(code, text, scored, data, isAI) {
     + '<div class="score-bar"><div class="bar-label">多空判斷</div><div class="bar-track"><div class="bar-fill ' + barType + '" style="width:' + barPct + '"></div></div><div class="bar-vals"><span style="color:var(--red)">偏空</span><span>' + dirText + '</span><span style="color:var(--green)">偏多</span></div></div>'
     + '<div class="score-bar"><div class="bar-label">資料完整度</div><div class="bar-track"><div class="bar-fill neutral" style="width:' + covPct + '%"></div></div><div class="bar-vals"><span></span><span>' + (cov ? cov.got + ' / ' + cov.total + ' 個資料源' : '') + '</span><span></span></div></div>'
     + '</div>'
+    + horizonHTML(data.horizons)
+    + kpiHTML(data)
     + '<div class="tags">' + tags + '<span class="tag tag-neutral">' + (isAI ? "AI 解讀＋量化分析" : "規則式量化分析") + '</span></div>'
     + (data.missing && data.missing.length ? '<div class="note" style="text-align:left;color:var(--yellow);margin-top:8px">⚠ 部分資料暫時無法取得（' + esc(data.missing.join("、")) + '），對應段落與評分項目未計入。</div>' : "")
     + '<div class="note" id="aiStatus" style="display:none;text-align:left;color:var(--accent2);margin-top:8px"></div>'
@@ -834,7 +886,8 @@ function renderReport(code, text, scored, data, isAI) {
     + '<div class="tabs-wrap fade-up">'
     + TABS.map(function(l,i) { return '<button class="tab-btn ' + (i===0?"on":"") + '" onclick="switchTab(' + i + ')">' + l + '</button>'; }).join("")
     + '</div>'
-    + PANES.map(function(p, i) { return '<div class="tab-pane' + (i === 0 ? ' on fade-up' : '') + '" id="tp' + i + '">' + p + '</div>'; }).join("");
+    + PANES.map(function(p, i) { return '<div class="tab-pane' + (i === 0 ? ' on fade-up' : '') + '" id="tp' + i + '">' + p + '</div>'; }).join("")
+    + GLOSSARY_HTML;
 
   document.getElementById("result").innerHTML = html;
 }

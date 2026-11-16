@@ -34,10 +34,15 @@ async function withHistory(src, rows) {
 }
 const base = (r) => ({ code: r.code, name: r.name, price: r.price, changePct: pctStr(r.changePct), volume: r.volume, sector: r.industry });
 
-async function runScan(src, { mode = "volume", limit = 20, universe = "custom" }) {
+async function runScan(src, { mode = "volume", limit = 20, universe = "custom", lite = false }) {
   limit = clamp(parseInt(limit, 10) || 20, 5, 30);
   if (!["volume", "change", "drop", "momentum", "sector", "limitup", "disposition"].includes(mode)) throw Object.assign(new Error("不支援的掃描模式：" + mode), { status: 400 });
   if (!["custom", "large", "all"].includes(universe)) universe = "custom";
+  if (lite && mode === "volume") { // 首頁熱門股列只需要代號與名稱：不評分、不消耗個股資料額度
+    const snap = await src.getMarketSnapshot();
+    const top = [...snap.stocks.values()].filter((r) => r.price > 0 && r.volume > 0 && !r.isETF).sort((a, b) => b.volume - a.volume).slice(0, limit);
+    return { mode, lite: true, stocks: top.map(base), cached: false, _v: S.VERSION, demo: !!src.demo };
+  }
   const key = `scan:${mode}:${limit}:${universe}`;
   let fresh = false;
   const result = await cached(key, 180000, async () => { fresh = true; return compute(src, mode, limit, universe); });

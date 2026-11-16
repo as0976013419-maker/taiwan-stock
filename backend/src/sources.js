@@ -269,15 +269,17 @@ async function getBalance(code) {
 /** 近四年現金／股票股利（依除息年度加總） */
 async function getDividends(code) {
   return cached(`div:${code}`, 24 * HOUR, async () => {
-    const rows = await finmind("TaiwanStockDividend", code, daysAgo(1500)); if (!rows.length) return null;
-    const by = new Map(); let lastEx = null;
+    const rows = await finmind("TaiwanStockDividend", code, daysAgo(2000)); if (!rows.length) return null; // 涵蓋整段 K 線期間，供還原權息使用
+    const by = new Map(), events = []; let lastEx = null;
     for (const r of rows) {
       const cash = (+r.CashEarningsDistribution || 0) + (+r.CashStatutorySurplus || 0), stock = (+r.StockEarningsDistribution || 0) + (+r.StockStatutorySurplus || 0);
       const ex = r.CashExDividendTradingDate || r.StockExDividendTradingDate || r.date, y = String(ex).slice(0, 4);
       const o = by.get(y) || { year: y, cash: 0, stock: 0, times: 0 }; o.cash += cash; o.stock += stock; o.times++; by.set(y, o);
+      if (cash > 0 && r.CashExDividendTradingDate) events.push({ date: r.CashExDividendTradingDate, cash, stock: 0 });
+      if (stock > 0 && r.StockExDividendTradingDate) events.push({ date: r.StockExDividendTradingDate, cash: 0, stock });
       if (r.CashExDividendTradingDate && (!lastEx || r.CashExDividendTradingDate > lastEx.date)) lastEx = { date: r.CashExDividendTradingDate, cash: round(cash, 3), period: r.year };
     }
-    return { years: [...by.values()].sort((a, b) => a.year.localeCompare(b.year)).map((o) => ({ year: o.year, cash: round(o.cash, 3), stock: round(o.stock, 3), times: o.times })), lastEx };
+    return { years: [...by.values()].sort((a, b) => a.year.localeCompare(b.year)).map((o) => ({ year: o.year, cash: round(o.cash, 3), stock: round(o.stock, 3), times: o.times })).slice(-5), lastEx, events };
   });
 }
 /** 外資持股比例與發行股數 */

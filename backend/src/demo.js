@@ -97,7 +97,7 @@ async function getBalance(code) {
 }
 async function getDividends(code) {
   const h = fullHistory(code); if (!h) return null; const f = fund(code), y = taipeiNow().getFullYear(), p = h.closes.at(-1);
-  return { years: [3, 2, 1, 0].map((k) => ({ year: String(y - k), cash: round(p * f.yield / 100 * (0.8 + (3 - k) * 0.07), 2), stock: 0, times: 1 })), lastEx: { date: y + "-07-15", cash: round(p * f.yield / 100, 2), period: "示範" } };
+  return { years: [3, 2, 1, 0].map((k) => ({ year: String(y - k), cash: round(p * f.yield / 100 * (0.8 + (3 - k) * 0.07), 2), stock: 0, times: 1 })), lastEx: { date: y + "-07-15", cash: round(p * f.yield / 100, 2), period: "示範" }, events: [] };
 }
 async function getHolding(code) { if (!fullHistory(code)) return null; const r = rng("o" + code), x = round(10 + r() * 50, 2), d = () => round((r() - 0.5) * 1.5, 2); return { date: fullHistory(code).dates.at(-1), ratio: x, ratio5: round(x - d() * 0.3, 2), ratio20: round(x - d(), 2), ratio60: round(x - d() * 2, 2), shares: Math.round(1e8 * (5 + r() * 250)) }; }
 async function getNews(code) { return fullHistory(code) ? [{ date: fullHistory(code).dates.at(-1) + " 09:00", title: "（示範）這是一則示範新聞標題，並非真實新聞", source: "示範", link: "https://example.com/" }] : []; }

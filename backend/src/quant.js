@@ -12,6 +12,30 @@ const quantile = (a, q) => { if (!a.length) return null; const s = a.slice().sor
 const pctRank = (arr, v) => { const a = arr.filter((x) => x !== null && isFinite(x)); if (!a.length || v === null || v === undefined || !isFinite(v)) return null; return round(a.filter((x) => x <= v).length / a.length * 100, 0); };
 const dailyRets = (c) => { const r = []; for (let i = 1; i < c.length; i++) r.push(c[i - 1] > 0 ? c[i] / c[i - 1] - 1 : 0); return r; };
 
+/**
+ * 價格還原。原始 K 線在除權息日與分割日會出現「假跳空」，直接拿來算報酬會把除息當成下跌、把分割當成崩盤。
+ * 回傳兩條序列：
+ *   price：只還原「股數變動」（股票股利、分割、減資）→ 用於均線、高低點、突破價等價位計算（除息缺口保留，與一般看盤軟體一致）
+ *   total：再還原現金股利 → 用於報酬率、波動、回撤、事件統計
+ * 分割／減資沒有官方事件資料時，以「單日變動超過 ±20%（漲跌幅限制為 10%）且非股利造成」偵測，
+ * 並以當日價格比估算還原倍數——這是估計值，會在 notes 中註明。
+ */
+function adjustPrices(hist, divEvents) {
+  const { dates: d, opens: o, highs: h, lows: l, closes: c, volumes: v } = hist, n = c.length;
+  const ev = new Map(); for (const e of divEvents || []) { const x = ev.get(e.date) || { cash: 0, stock: 0 }; x.cash += e.cash || 0; x.stock += e.stock || 0; ev.set(e.date, x); }
+  const fS = new Array(n).fill(1), fD = new Array(n).fill(1), notes = []; let cs = 1, cd = 1, nDiv = 0;
+  for (let i = n - 1; i >= 1; i--) {
+    fS[i] = cs; fD[i] = cd; const prev = c[i - 1], e = ev.get(d[i]); let ref = prev, share = 1;
+    if (e && prev > 0) { if (e.cash > 0 && e.cash < prev) { cd *= (prev - e.cash) / prev; ref = prev - e.cash; nDiv++; } if (e.stock > 0) { share = 1 / (1 + e.stock / 10); ref *= share; } }
+    const resid = ref > 0 ? c[i] / ref - 1 : 0;
+    if (i >= 10 && Math.abs(resid) > 0.2) { share *= c[i] / ref; notes.push({ date: d[i], ratio: round(ref / c[i], 3), estimated: true }); }
+    cs *= share;
+  }
+  fS[0] = cs; fD[0] = cd;
+  const mk = (withDiv) => { const f = (i) => fS[i] * (withDiv ? fD[i] : 1); return { code: hist.code, dates: d, opens: o.map((x, i) => x * f(i)), highs: h.map((x, i) => x * f(i)), lows: l.map((x, i) => x * f(i)), closes: c.map((x, i) => x * f(i)), volumes: v.map((x, i) => x / fS[i]) }; };
+  return { price: mk(false), total: mk(true), splits: notes, dividendsApplied: nDiv, changed: notes.length > 0 || nDiv > 0 };
+}
+
 /** Wilder ATR，回傳最新值 */
 function atr(h, l, c, p = 14) {
   if (c.length <= p) return null; const tr = [];
@@ -48,15 +72,15 @@ function riskMetrics(hist, idx) {
 }
 
 /** 多週期報酬與相對大盤的超額報酬 */
-function relStrength(hist, idx) {
-  const { closes: c, dates: d } = hist, n = c.length, id = idx && idx.dates ? idx.dates : null;
+function relStrength(hist, idx, total) {
+  const { closes: c, dates: d } = hist, n = c.length, id = idx && idx.dates ? idx.dates : null, tc = total ? total.closes : null;
   // 指數資料可能比個股晚一天更新（盤中／剛收盤）：取「不晚於該日」的最近一根指數
   const at = (date) => { if (!id) return -1; let lo = 0, hi = id.length - 1, r = -1; while (lo <= hi) { const m = (lo + hi) >> 1; if (id[m] <= date) { r = m; lo = m + 1; } else hi = m - 1; } return r; };
   return [["1 週", 5], ["1 個月", 20], ["3 個月", 60], ["6 個月", 120], ["1 年", 250], ["3 年", 750]].map(([label, k]) => {
-    if (n <= k) return { label, k, ret: null, idx: null, excess: null };
+    if (n <= k) return { label, k, ret: null, tr: null, idx: null, excess: null };
     const ret = (c[n - 1] / c[n - 1 - k] - 1) * 100; let ir = null;
     const x = at(d[n - 1]), y = at(d[n - 1 - k]); if (x > 0 && y >= 0 && x > y) ir = (idx.closes[x] / idx.closes[y] - 1) * 100;
-    return { label, k, ret: round(ret), idx: round(ir), excess: ir === null ? null : round(ret - ir) };
+    return { label, k, ret: round(ret), tr: tc ? round((tc[n - 1] / tc[n - 1 - k] - 1) * 100) : null, idx: round(ir), excess: ir === null ? null : round(ret - ir) };
   });
 }
 
@@ -110,15 +134,27 @@ function eventStudy(hist) {
     ["kdlow", "KD 在 30 以下 K 上穿 D", (i) => KD.K[i - 1] !== null && KD.K[i - 1] <= KD.D[i - 1] && KD.K[i] > KD.D[i] && KD.K[i] < 30],
     ["dev60", "股價低於 60 日均線 10% 以上", (i) => m60[i] && c[i] < m60[i] * 0.9 && !(c[i - 1] < m60[i - 1] * 0.9)],
   ];
-  const H = [5, 10, 20], start = 65;
-  const stat = (idxs, k) => { const rs = idxs.filter((i) => i + k < n).map((i) => (c[i + k] / c[i] - 1) * 100); return rs.length ? { n: rs.length, win: round(rs.filter((x) => x > 0).length / rs.length * 100, 0), mean: round(mean(rs)), median: round(median(rs)) } : { n: 0 }; };
+  const H = [5, 10, 20], start = 65, o = hist.opens, COST = 0.585; // 來回交易成本：手續費 0.1425%×2 ＋ 證交稅 0.3%
+  // 進場價用「訊號隔日開盤」：訊號要到收盤才確定，當天收盤價實際上買不到（避免前視偏誤）
+  const fwd = (i, k) => (i + 1 + k < n && o[i + 1] > 0 ? (c[i + k + 1] / o[i + 1] - 1) * 100 : null);
+  const stat = (idxs, k) => {
+    const rs = idxs.map((i) => fwd(i, k)).filter((x) => x !== null); if (!rs.length) return { n: 0 };
+    // 獨立樣本數：持有期互不重疊的事件數（重疊的事件其實是同一段行情，不能當成獨立證據）
+    let indep = 0, lastEnd = -1; for (const i of idxs) { if (fwd(i, k) === null) continue; if (i > lastEnd) { indep++; lastEnd = i + k; } }
+    return { n: rs.length, indep, win: round(rs.filter((x) => x > 0).length / rs.length * 100, 0), mean: round(mean(rs)), median: round(median(rs)), sd: rs.length > 1 ? round(std(rs)) : null };
+  };
   const all = []; for (let i = start; i < n; i++) all.push(i);
+  const baseline = H.map((k) => stat(all, k));
   const events = EV.map(([key, name, fn]) => {
     const idxs = []; for (let i = start; i < n; i++) { try { if (fn(i)) idxs.push(i); } catch (e) { /* 指標尚未就緒 */ } }
     const last = idxs.length ? idxs[idxs.length - 1] : -1;
-    return { key, name, count: idxs.length, active: last >= n - 3, lastDate: last >= 0 ? hist.dates[last] : null, h: H.map((k) => stat(idxs, k)) };
+    const h = H.map((k, j) => { const x = stat(idxs, k), b = baseline[j];
+      if (x.n && x.sd && x.indep >= 2) { x.excess = round(x.mean - b.mean); x.t = round((x.mean - b.mean) / (x.sd / Math.sqrt(x.indep))); x.net = round(x.mean - COST); }
+      // 證據等級：獨立樣本 < 10 → 不足；|t| ≥ 2.9（對 33 組檢定做 Bonferroni 校正後約 5% 水準）→ 顯著；|t| ≥ 2 → 僅未校正下顯著；其餘 → 與基準無法區分
+      x.grade = !x.n || x.indep < 10 ? "insufficient" : Math.abs(x.t) >= 2.9 ? "strong" : Math.abs(x.t) >= 2 ? "weak" : "none"; return x; });
+    return { key, name, count: idxs.length, active: last >= n - 3, lastDate: last >= 0 ? hist.dates[last] : null, h };
   });
-  return { bars: n, years: round(n / 250, 1), horizons: H, baseline: H.map((k) => stat(all, k)), events };
+  return { bars: n, years: round(n / 250, 1), horizons: H, baseline, events, cost: COST, tests: EV.length * H.length };
 }
 
 /** 動能／波動因子（個股自身的時間序列值） */
@@ -135,4 +171,4 @@ function sizing(price, atr14, stops, capital = 1000000, riskPct = 1) {
     return { name, stop: round(stop), distPct: round(dist / price * 100), shares, lots: round(shares / 1000, 2), value: Math.round(value), weight: round(value / capital * 100, 1) };
   });
 }
-module.exports = { mean, std, median, quantile, pctRank, atr, riskMetrics, relStrength, trendTemplate, turtle, eventStudy, factors, sizing };
+module.exports = { mean, std, median, quantile, pctRank, adjustPrices, atr, riskMetrics, relStrength, trendTemplate, turtle, eventStudy, factors, sizing };

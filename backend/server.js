@@ -65,7 +65,7 @@ async function api(req, res, url, ip) {
   }
   if (p === "/scan" && req.method === "GET") {
     if (limited(ip, "scan", 20, 60000)) return send(res, 429, { error: "掃描次數過於頻繁，請稍後再試" });
-    return send(res, 200, await runScan(src, { mode: q.get("mode") || "volume", limit: q.get("limit"), universe: q.get("universe") || "custom" }));
+    return send(res, 200, await runScan(src, { mode: q.get("mode") || "volume", limit: q.get("limit"), universe: q.get("universe") || "custom", lite: q.get("lite") === "1" }));
   }
   if (p === "/history" && req.method === "GET") {
     const code = q.get("code"), start = q.get("start") || daysAgo(1100), end = q.get("end") || ymd(taipeiNow());
