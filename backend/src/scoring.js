@@ -4,7 +4,7 @@
 // 無資料的細項不給分也不扣分——所以資料缺漏時總分會偏低，這是刻意的保守設計。
 const { clamp, round } = require("./util");
 
-const VERSION = "score-v5.0";
+const VERSION = "score-v5.1";
 const tickOf = (p, etf) => etf ? (p < 50 ? 0.01 : 0.05) : (p < 10 ? 0.01 : p < 50 ? 0.05 : p < 100 ? 0.1 : p < 500 ? 0.5 : p < 1000 ? 1 : 5);
 /** 漲停價：前收 ×1.10，向下取到升降單位 */
 function limitUpPrice(prev, etf) { const raw = prev * 1.1, t = tickOf(raw, etf); return round(Math.floor(raw / t + 1e-9) * t, 2); }
@@ -35,12 +35,16 @@ function scoreStock(x) {
   // ── 基本面 20 ──
   const yoy = f.revYoY, pe = f.pe, pb = f.pb;
   fund += (yoy === null || yoy === undefined) ? na("rev_yoy") : pts("rev_yoy", yoy >= 20 ? 8 : yoy >= 10 ? 6 : yoy >= 0 ? 3 : 0);
-  fund += !(pe > 0) ? na("eps_growth") : pts("eps_growth", pe <= 15 ? 5 : pe <= 25 ? 3 : pe <= 40 ? 1 : 0);
-  const roe = (pe > 0 && pb > 0) ? pb / pe * 100 : null; // ROE ≈ PB ÷ PE
+  // EPS：有季財報時看單季 EPS 年增率，否則退回用本益比高低
+  if (f.epsYoY !== null && f.epsYoY !== undefined) fund += pts("eps_growth", f.epsYoY >= 25 ? 5 : f.epsYoY >= 10 ? 3 : f.epsYoY >= 0 ? 1 : 0);
+  else fund += !(pe > 0) ? na("eps_growth") : pts("eps_growth", pe <= 15 ? 5 : pe <= 25 ? 3 : pe <= 40 ? 1 : 0);
+  // ROE：有財報時用「近四季稅後淨利 ÷ 最新股東權益」，否則以 PB ÷ PE 估算
+  const roe = (f.roe !== null && f.roe !== undefined) ? f.roe : (pe > 0 && pb > 0) ? pb / pe * 100 : null;
   fund += roe === null ? na("roe") : pts("roe", roe >= 15 ? 4 : roe >= 8 ? 2 : 0);
   // 毛利率「代理」：沒有逐季財報時，以營收 YoY 與 MoM 同時不衰退當作獲利結構穩定的替代訊號
   const mom = f.revMoM;
-  fund += (yoy === null || yoy === undefined || mom === null || mom === undefined) ? na("margin_stable") : pts("margin_stable", (yoy >= 0 && mom >= 0) ? 3 : (yoy >= 0 || mom >= 0) ? 1 : 0);
+  if (f.gmYoY !== null && f.gmYoY !== undefined) fund += pts("margin_stable", f.gmYoY >= 0 ? 3 : f.gmYoY >= -2 ? 1 : 0); // 實際毛利率與去年同季相比
+  else fund += (yoy === null || yoy === undefined || mom === null || mom === undefined) ? na("margin_stable") : pts("margin_stable", (yoy >= 0 && mom >= 0) ? 3 : (yoy >= 0 || mom >= 0) ? 1 : 0);
 
   // ── 技術面 25 ／ 量價 15 ──
   if (ind && ind.ma20 !== null) {
@@ -65,7 +69,9 @@ function scoreStock(x) {
     // 大戶持股「代理」：近 20 日法人累計買超佔同期成交量比重（集保大戶級距資料需付費，故以此替代）
     const sum20 = s.slice(-20).reduce((a, r) => a + r.total, 0), v20 = ind && ind.vma20 ? ind.vma20 / 1000 * Math.min(20, s.length) : null;
     const ratio = v20 ? sum20 / v20 * 100 : null;
-    chip += ratio === null ? na("big_player") : pts("big_player", ratio >= 3 ? 4 : ratio >= 1 ? 2 : 0);
+    // 有外資持股資料時，改看外資持股比例近 20 日的變化
+    if (x.holding && isFinite(x.holding.ratio) && isFinite(x.holding.ratio20)) { const dlt = x.holding.ratio - x.holding.ratio20; chip += pts("big_player", dlt >= 0.3 ? 4 : dlt > 0 ? 2 : 0); }
+    else chip += ratio === null ? na("big_player") : pts("big_player", ratio >= 3 ? 4 : ratio >= 1 ? 2 : 0);
   } else if (snap.inst) { // 掃描模式：只有當日法人
     const n = snap.inst, ratio = snap.volume > 0 ? n.total / snap.volume * 100 : null;
     chip += pts("foreign_buy", n.foreign > 0 ? 3 : 0); chip += pts("site_buy", n.trust > 0 ? 3 : 0); chip += pts("inst_total", n.total > 0 ? 4 : 0);

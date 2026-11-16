@@ -59,7 +59,7 @@ async function getHistory(code, start, end) {
 }
 function chipSeries(code) {
   const r = rng("c" + code), h = fullHistory(code), bias = (r() - 0.45) * 0.6, out = [];
-  for (let i = h.dates.length - 30; i < h.dates.length; i++) {
+  for (let i = h.dates.length - 60; i < h.dates.length; i++) {
     const lots = h.volumes[i] / 1000, f = Math.round(lots * (bias + gauss(r) * 0.3) * 0.15), t = Math.round(lots * (bias * 0.5 + gauss(r) * 0.3) * 0.04), d = Math.round(lots * gauss(r) * 0.02);
     out.push({ date: h.dates[i], foreign: f, trust: t, dealer: d, total: f + t + d });
   }
@@ -67,26 +67,55 @@ function chipSeries(code) {
 }
 function marginSeries(code) {
   const r = rng("m" + code), h = fullHistory(code), limit = Math.round(20000 + r() * 300000); let bal = Math.round(limit * (0.03 + r() * 0.3)); const out = [];
-  for (let i = h.dates.length - 30; i < h.dates.length; i++) { bal = Math.max(100, Math.round(bal * (1 + gauss(r) * 0.02))); out.push({ date: h.dates[i], bal, limit, shortBal: Math.round(bal * (0.02 + r() * 0.1)) }); }
+  for (let i = h.dates.length - 60; i < h.dates.length; i++) { bal = Math.max(100, Math.round(bal * (1 + gauss(r) * 0.02))); out.push({ date: h.dates[i], bal, limit, shortBal: Math.round(bal * (0.02 + r() * 0.1)) }); }
   return out;
 }
 const getChip = async (code) => (fullHistory(code) ? chipSeries(code) : []);
 const getMargin = async (code) => (fullHistory(code) && !/^00/.test(code) ? marginSeries(code) : []);
 function fund(code) { const r = rng("f" + code); return { pe: round(8 + r() * 30, 1), pb: round(0.8 + r() * 6, 2), yield: round(1 + r() * 5, 2), yoy: round((r() - 0.3) * 60, 1), mom: round((r() - 0.5) * 30, 1) }; }
 async function getRevenue(code) {
-  if (!fullHistory(code) || /^00/.test(code)) return null; const f = fund(code), d = taipeiNow(); d.setMonth(d.getMonth() - 1);
-  return { ym: d.getFullYear() + "/" + String(d.getMonth() + 1).padStart(2, "0"), revenue: Math.round(1e9 * (1 + rng("r" + code)() * 50)), yoy: f.yoy, mom: f.mom, yoy3: [round(f.yoy * 0.8, 1), round(f.yoy * 1.1, 1), f.yoy] };
+  if (!fullHistory(code) || /^00/.test(code)) return null; const f = fund(code), r = rng("r" + code), base = 1e9 * (1 + r() * 50), months = [], d = taipeiNow(); d.setDate(1);
+  for (let k = 12; k >= 1; k--) { const x = new Date(d); x.setMonth(x.getMonth() - k); const yoy = round(f.yoy + (r() - 0.5) * 20, 1); months.push({ ym: x.getFullYear() + "/" + String(x.getMonth() + 1).padStart(2, "0"), revenue: Math.round(base * (1 + (12 - k) * 0.01 + (r() - 0.5) * 0.1)), yoy, mom: round((r() - 0.5) * 20, 1) }); }
+  const L = months[11]; L.yoy = f.yoy; L.mom = f.mom;
+  return { ym: L.ym, revenue: L.revenue, yoy: L.yoy, mom: L.mom, yoy3: months.slice(-3).map((m) => m.yoy), months, ytdYoY: round(f.yoy * 0.9, 1), newHigh: false };
 }
-async function getPER(code) { if (!fullHistory(code) || /^00/.test(code)) return null; const f = fund(code); return { pe: f.pe, pb: f.pb, yield: f.yield }; }
+async function getPER(code) {
+  if (!fullHistory(code) || /^00/.test(code)) return null; const f = fund(code), r = rng("p" + code), mk = (v) => Array.from({ length: 1200 }, () => round(v * (0.6 + r() * 0.9), 2));
+  return { pe: f.pe, pb: f.pb, yield: f.yield, hist: { pe: mk(f.pe), pb: mk(f.pb), yield: mk(f.yield), from: "2021-11-15" } };
+}
+async function getFinancials(code) {
+  if (!fullHistory(code) || /^00/.test(code)) return null; const r = rng("q" + code), f = fund(code), out = [], gm0 = 15 + r() * 40, rev0 = 3e9 * (1 + r() * 60), d = taipeiNow();
+  let y = d.getFullYear(), q = Math.floor(d.getMonth() / 3); if (q === 0) { y--; q = 4; }
+  for (let k = 8; k >= 0; k--) { let yy = y, qq = q - k; while (qq <= 0) { qq += 4; yy--; }
+    const rev = rev0 * (1 + (8 - k) * 0.03 + (r() - 0.5) * 0.08), gm = gm0 + (r() - 0.5) * 4, om = gm - 12 - r() * 5, nm = om * 0.82, ni = rev * nm / 100;
+    out.push({ date: yy + "-" + String(qq * 3).padStart(2, "0") + "-30", label: yy + "Q" + qq, revenue: Math.round(rev), gross: Math.round(rev * gm / 100), opInc: Math.round(rev * om / 100), netInc: Math.round(ni), eps: round(Math.max(0.1, f.pe ? fullHistory(code).closes.at(-1) / f.pe / 4 * (0.8 + (8 - k) * 0.04 + r() * 0.1) : 1), 2), gm: round(gm, 1), om: round(om, 1), nm: round(nm, 1) }); }
+  return out;
+}
+async function getBalance(code) {
+  const q = await getFinancials(code); if (!q) return null; const r = rng("b" + code), ttm = q.slice(-4).reduce((s, x) => s + x.netInc, 0), equity = ttm / (0.06 + r() * 0.2), liab = equity * (0.3 + r() * 1.2);
+  return { date: q.at(-1).date, assets: Math.round(equity + liab), liabilities: Math.round(liab), equity: Math.round(equity), curAssets: Math.round((equity + liab) * 0.4), curLiab: Math.round(liab * 0.5), cash: Math.round(equity * 0.2), inventory: Math.round(equity * 0.1) };
+}
+async function getDividends(code) {
+  const h = fullHistory(code); if (!h) return null; const f = fund(code), y = taipeiNow().getFullYear(), p = h.closes.at(-1);
+  return { years: [3, 2, 1, 0].map((k) => ({ year: String(y - k), cash: round(p * f.yield / 100 * (0.8 + (3 - k) * 0.07), 2), stock: 0, times: 1 })), lastEx: { date: y + "-07-15", cash: round(p * f.yield / 100, 2), period: "示範" } };
+}
+async function getHolding(code) { if (!fullHistory(code)) return null; const r = rng("o" + code), x = round(10 + r() * 50, 2), d = () => round((r() - 0.5) * 1.5, 2); return { date: fullHistory(code).dates.at(-1), ratio: x, ratio5: round(x - d() * 0.3, 2), ratio20: round(x - d(), 2), ratio60: round(x - d() * 2, 2), shares: Math.round(1e8 * (5 + r() * 250)) }; }
+async function getNews(code) { return fullHistory(code) ? [{ date: fullHistory(code).dates.at(-1) + " 09:00", title: "（示範）這是一則示範新聞標題，並非真實新聞", source: "示範", link: "https://example.com/" }] : []; }
+let _idx = null;
+async function getIndex() { // 以所有示範股的等權平均報酬合成一條「大盤」
+  if (_idx) return _idx; const hs = LIST.filter((m) => !/^00/.test(m[0])).map((m) => fullHistory(m[0])), n = hs[0].closes.length, closes = [20000];
+  for (let i = 1; i < n; i++) closes.push(closes[i - 1] * (1 + hs.reduce((s, h) => s + (h.closes[i] / h.closes[i - 1] - 1), 0) / hs.length));
+  return (_idx = { code: "TAIEX", dates: hs[0].dates, opens: closes, highs: closes, lows: closes, closes, volumes: new Array(n).fill(0) });
+}
 
 function row(meta) {
   const [code, name, industry] = meta, h = fullHistory(code), i = h.closes.length - 1, price = h.closes[i], prev = h.closes[i - 1], f = fund(code), etf = /^00/.test(code);
-  const c = chipSeries(code)[29], m = marginSeries(code);
+  const c = chipSeries(code)[59], m = marginSeries(code);
   return {
     code, name, market: OTC.has(code) ? "上櫃" : "上市", isETF: etf, industry, price, prevClose: prev, change: round(price - prev), changePct: round((price / prev - 1) * 100),
     open: h.opens[i], high: h.highs[i], low: h.lows[i], volume: Math.round(h.volumes[i] / 1000), value: Math.round(h.volumes[i] * price), date: h.dates[i],
     pe: etf ? null : f.pe, pb: etf ? null : f.pb, yield: f.yield, revYoY: etf ? null : f.yoy, revMoM: etf ? null : f.mom,
-    inst: { foreign: c.foreign, trust: c.trust, dealer: c.dealer, total: c.total }, margin: etf ? null : { bal: m[29].bal, prev: m[28].bal, limit: m[29].limit, shortBal: m[29].shortBal },
+    inst: { foreign: c.foreign, trust: c.trust, dealer: c.dealer, total: c.total }, margin: etf ? null : { bal: m[59].bal, prev: m[58].bal, limit: m[59].limit, shortBal: m[59].shortBal },
   };
 }
 let _snap = null;
@@ -98,4 +127,4 @@ async function getQuote(code) { const s = (await getMarketSnapshot()).stocks.get
 async function getDisposition() {
   return [{ code: "4743", name: "合一", type: "處置股", reason: "連續三次達注意標準（示範）", period: "示範期間" }, { code: "6446", name: "藥華藥", type: "注意股", reason: "近六日累積漲幅異常（示範）", period: "" }];
 }
-module.exports = { demo: true, getMarketSnapshot, getHistory, getChip, getMargin, getRevenue, getPER, getQuote, getDisposition };
+module.exports = { demo: true, getMarketSnapshot, getHistory, getChip, getMargin, getRevenue, getPER, getFinancials, getBalance, getDividends, getHolding, getNews, getIndex, getQuote, getDisposition };

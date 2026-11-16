@@ -5,6 +5,7 @@ const { snapshot } = require("./indicators");
 const { scoreStock, VERSION } = require("./scoring");
 const { sectorStats } = require("./scan");
 const { buildReport } = require("./report");
+const Q = require("./quant");
 
 const ok = (r) => (r.status === "fulfilled" ? r.value : null);
 
@@ -25,16 +26,17 @@ async function analyze(src, input) {
 }
 
 async function build(src, code) {
-  const [rs, rq, rh, rc, rm, rr] = await Promise.allSettled([
-    src.getMarketSnapshot(), src.getQuote(code), src.getHistory(code, daysAgo(560)), src.getChip(code), src.getMargin(code), src.getRevenue(code),
+  const etfCode = /^00/.test(code), skip = () => Promise.resolve(null);
+  // 個股專屬資料（FinMind）各自獨立失敗；ETF 不抓財報類
+  const [rs, rq, rh, rc, rm, rr, rp, rf, rb, rd, rho, rn, ri] = await Promise.allSettled([
+    src.getMarketSnapshot(), src.getQuote(code), src.getHistory(code, daysAgo(1900)), src.getChip(code), src.getMargin(code),
+    etfCode ? skip() : src.getRevenue(code), etfCode ? skip() : src.getPER(code), etfCode ? skip() : src.getFinancials(code), etfCode ? skip() : src.getBalance(code),
+    src.getDividends(code), src.getHolding(code), src.getNews(code), src.getIndex(),
   ]);
   const snapAll = ok(rs), row = snapAll ? snapAll.stocks.get(code) : null, live = ok(rq), hist = ok(rh);
-  // 本益比等估值：全市場快照已有就不再多打一次個股 API（節省 FinMind 額度）
-  const rp = (row && (row.pe || row.isETF)) ? { status: "fulfilled", value: null } : await src.getPER(code).then((value) => ({ status: "fulfilled", value }), () => ({ status: "rejected" }));
-  const quota = [rh, rc, rm, rr].some((r) => r.status === "rejected" && r.reason && r.reason.quota);
+  const quota = [rh, rc, rm, rr, rp, rf, rb, rd, rho, rn, ri].some((r) => r.status === "rejected" && r.reason && r.reason.quota);
   const hasHist = hist && hist.closes && hist.closes.length >= 30;
   if (!row && !live && !hasHist) throw Object.assign(new Error("查無此股票代號，或資料來源暫時無法連線：" + code), { status: 404 });
-
   // 報價優先序：盤中即時 → 日收盤快照 → 歷史最後一根
   const n = hasHist ? hist.closes.length - 1 : -1;
   const fromHist = hasHist ? { code, name: code, price: hist.closes[n], prevClose: hist.closes[n - 1], change: round(hist.closes[n] - hist.closes[n - 1]), changePct: round((hist.closes[n] / hist.closes[n - 1] - 1) * 100), open: hist.opens[n], high: hist.highs[n], low: hist.lows[n], volume: Math.round(hist.volumes[n] / 1000), date: hist.dates[n] } : {};
@@ -47,21 +49,49 @@ async function build(src, code) {
   else if (h && row) h = mergeBar(h, row);
   const indicators = h ? snapshot(h) : null;
   const chip = ok(rc) && ok(rc).length ? ok(rc) : null, margin = ok(rm) && ok(rm).length ? ok(rm) : null, revenue = ok(rr), per = ok(rp);
+  const fin = ok(rf), bal = ok(rb), dividends = ok(rd), holding = ok(rho), news = ok(rn) || [], index = ok(ri) && ok(ri).closes && ok(ri).closes.length > 60 ? ok(ri) : null;
   const fundamentals = {
-    pe: (per && per.pe) || (row && row.pe) || null, pb: (per && per.pb) || (row && row.pb) || null, yield: (per && per.yield) || (row && row.yield) || null,
+    pe: (row && row.pe) || (per && per.pe) || null, pb: (row && row.pb) || (per && per.pb) || null, yield: (row && row.yield) || (per && per.yield) || null,
     revYoY: revenue && revenue.yoy !== null ? revenue.yoy : (row ? row.revYoY : null), revMoM: revenue && revenue.mom !== null ? revenue.mom : (row ? row.revMoM : null),
   };
   if (quote.isETF) { fundamentals.pe = fundamentals.pb = fundamentals.revYoY = fundamentals.revMoM = null; }
+  // 財報衍生：近四季 EPS、單季 EPS 年增、實際 ROE、毛利率變化、負債比
+  if (fin && fin.length) {
+    const L = fin[fin.length - 1], Y = fin.length >= 5 ? fin[fin.length - 5] : null, last4 = fin.slice(-4), prev4 = fin.length >= 8 ? fin.slice(-8, -4) : null, sum = (a, k) => a.every((x) => x[k] !== null) ? a.reduce((t, x) => t + x[k], 0) : null;
+    Object.assign(fundamentals, { quarter: L.label, epsQ: L.eps, epsYoY: Y && Y.eps > 0 && L.eps !== null ? round((L.eps / Y.eps - 1) * 100, 1) : null, epsTTM: last4.length === 4 ? round(sum(last4, "eps"), 2) : null,
+      epsTTMYoY: prev4 && sum(prev4, "eps") > 0 && sum(last4, "eps") !== null ? round((sum(last4, "eps") / sum(prev4, "eps") - 1) * 100, 1) : null,
+      gm: L.gm, gmYoY: Y && Y.gm !== null && L.gm !== null ? round(L.gm - Y.gm, 1) : null, om: L.om, nm: L.nm,
+      roe: bal && bal.equity > 0 && last4.length === 4 && sum(last4, "netInc") !== null ? round(sum(last4, "netInc") / bal.equity * 100, 1) : null });
+  }
+  if (bal) Object.assign(fundamentals, { debtRatio: bal.assets > 0 && bal.liabilities !== null ? round(bal.liabilities / bal.assets * 100, 1) : null, currentRatio: bal.curLiab > 0 && bal.curAssets ? round(bal.curAssets / bal.curLiab * 100, 0) : null });
+  if (holding && holding.shares && quote.price) fundamentals.marketCap = holding.shares * quote.price;
+  // 橫斷面百分位：估值與營收動能在全市場、同產業中的位置
+  if (snapAll && row && !quote.isETF) {
+    const all = [...snapAll.stocks.values()].filter((r) => !r.isETF), same = all.filter((r) => r.industry === row.industry), col = (a, k) => a.map((r) => r[k]).filter((x) => x !== null && x > (k === "revYoY" ? -1000 : 0));
+    fundamentals.rank = { peMkt: Q.pctRank(col(all, "pe"), fundamentals.pe), peInd: Q.pctRank(col(same, "pe"), fundamentals.pe), pbMkt: Q.pctRank(col(all, "pb"), fundamentals.pb), yieldMkt: Q.pctRank(col(all, "yield"), fundamentals.yield),
+      revMkt: Q.pctRank(col(all, "revYoY"), fundamentals.revYoY), revInd: Q.pctRank(col(same, "revYoY"), fundamentals.revYoY), indCount: same.length, mktCount: all.length };
+  }
+  if (per && per.hist && fundamentals.pe) fundamentals.own = { pePct: Q.pctRank(per.hist.pe, fundamentals.pe), pbPct: Q.pctRank(per.hist.pb, fundamentals.pb), yieldPct: Q.pctRank(per.hist.yield, fundamentals.yield), peMed: round(Q.median(per.hist.pe), 1), peLo: round(Q.quantile(per.hist.pe, 0.1), 1), peHi: round(Q.quantile(per.hist.pe, 0.9), 1), from: per.hist.from };
   let sector = null;
   if (snapAll && row && !row.isETF) { const st = sectorStats([...snapAll.stocks.values()].filter((r) => r.price > 0)).get(row.industry); if (st) sector = { sector: st.sector, rank: st.rank, heat: st.heat, upRatio: st.upRatio, avgChangePct: st.avgChangePct, count: st.count }; }
 
-  const scored = scoreStock({ snap: Object.assign({}, row || {}, { isETF: quote.isETF }), ind: indicators, chip, margin, fund: fundamentals, sector });
+  const scored = scoreStock({ snap: Object.assign({}, row || {}, { isETF: quote.isETF }), ind: indicators, chip, margin, fund: fundamentals, sector, holding });
+  // 量化模組
+  const rs2 = h ? Q.relStrength(h, index) : null;
+  const quant = h ? { risk: Q.riskMetrics(h, index), rs: rs2, trend: Q.trendTemplate(h, rs2), turtle: Q.turtle(h), events: Q.eventStudy(h), factors: Q.factors(h) } : null;
+  let market = null; // 大盤狀態（順勢交易的前提）
+  if (index) { const ic = index.closes, m = (p) => (ic.length >= p ? ic.slice(-p).reduce((a, x) => a + x, 0) / p : null), last = ic[ic.length - 1];
+    market = { date: index.dates[index.dates.length - 1], close: round(last), ma50: round(m(50)), ma200: round(m(200)), above50: m(50) !== null && last > m(50), above200: m(200) !== null && last > m(200), ret20: round((last / ic[ic.length - 21] - 1) * 100), ret60: round((last / ic[ic.length - 61] - 1) * 100) }; }
   const missing = [];
   if (quota) missing.push("FinMind 額度已用盡（約 10 分鐘後恢復，或設定 FINMIND_TOKEN）");
+  if (!etfCode) { if (!fin) missing.push("季財報"); if (!bal) missing.push("資產負債表"); if (!per) missing.push("歷史估值"); }
+  if (!holding) missing.push("外資持股"); if (!index) missing.push("大盤指數");
   if (!indicators) missing.push("歷史K線"); if (!chip) missing.push(row && row.inst ? "三大法人歷史（僅有當日）" : "三大法人"); if (!margin && !quote.isETF) missing.push("融資融券"); if (!revenue && !quote.isETF && fundamentals.revYoY === null) missing.push("月營收");
-  const out = { code, quote, indicators, chip, margin, fundamentals, revenue, sector, scored, missing, instToday: row ? row.inst : null, marginToday: row ? row.margin : null, _v: VERSION, demo: !!src.demo,
+  const out = { code, quote, indicators, chip, margin, fundamentals, revenue, sector, scored, missing, instToday: row ? row.inst : null, marginToday: row ? row.margin : null,
+    financials: fin, balance: bal, dividends, holding, news, quant, market, coverage: { got: [snapAll, hist, chip, margin, etfCode || revenue, etfCode || per, etfCode || fin, etfCode || bal, dividends, holding, index].filter(Boolean).length, total: 11 }, _v: VERSION, demo: !!src.demo,
     history: h ? h.dates.slice(-60).map((d, k) => { const j = h.dates.length - Math.min(60, h.dates.length) + k; return { date: d, open: h.opens[j], high: h.highs[j], low: h.lows[j], close: h.closes[j], volume: h.volumes[j] }; }) : [] };
-  out.text = buildReport(out);
+  const rep = buildReport(out);
+  out.text = rep.text; out.stance = rep.stance; out.tags = rep.tags;
   return out;
 }
 /** 把「今天」的行情併入歷史最後一根（歷史快取較久，最新一根以快照／即時報價為準） */

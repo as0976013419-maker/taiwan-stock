@@ -693,9 +693,9 @@ function renderReport(code, text, scored, data, isAI) {
     // 評分細項 tooltip 內容
     var detailItems = [
       { key:"rev_yoy",      label:"月營收年增率" },
-      { key:"eps_growth",   label:"EPS/PE" },
-      { key:"roe",          label:"ROE估算" },
-      { key:"margin_stable",label:"毛利率代理" },
+      { key:"eps_growth",   label:"EPS年增／本益比" },
+      { key:"roe",          label:"ROE" },
+      { key:"margin_stable",label:"毛利率趨勢" },
       { key:"above_ma20",   label:"站上MA20" },
       { key:"ma20_up",      label:"MA20向上" },
       { key:"ma60_up",      label:"MA60向上" },
@@ -707,7 +707,7 @@ function renderReport(code, text, scored, data, isAI) {
       { key:"foreign_buy",  label:"外資連買" },
       { key:"site_buy",     label:"投信連買" },
       { key:"inst_total",   label:"法人合計" },
-      { key:"big_player",   label:"大戶持股" },
+      { key:"big_player",   label:"外資持股變化" },
       { key:"margin_health",label:"融資健康" },
       { key:"margin_decrease",label:"融資去槓桿"},
       { key:"theme_main",   label:"題材強勢" },
@@ -743,65 +743,80 @@ function renderReport(code, text, scored, data, isAI) {
       + '</div>';
   }
 
-  text = text || ""; // 防止 null.indexOf/match 崩潰
-  var sec = {
-    overview:parseSection(text,"行情總覽"), tech:parseSection(text,"技術分析"),
-    short:parseSection(text,"短線分析"), mid:parseSection(text,"中線分析"),
-    longanalysis:parseSection(text,"長線分析"), longtrend:parseSection(text,"長線趨勢分析"),
-    chip:parseSection(text,"籌碼分析"), chiptype:parseSection(text,"籌碼屬性分析"),
-    legal:parseSection(text,"法人分析"), margin:parseSection(text,"融資融券分析"),
-    fund:parseSection(text,"基本面分析"), industry:parseSection(text,"產業分析"),
-    market:parseSection(text,"市場風格判定"), position:parseSection(text,"位階分析"),
-    risk:parseSection(text,"風險分析"), levels:parseSection(text,"支撐壓力"),
-    strategy:parseSection(text,"操作策略"), ai:parseSection(text,"AI綜合分析")||parseSection(text,"綜合分析"),
-    verdict:parseSection(text,"最終裁定")
-  };
-  var isBull = sec.verdict.indexOf("偏多") >= 0 || sec.verdict.indexOf("看多") >= 0;
-  var isBear = sec.verdict.indexOf("偏空") >= 0 || sec.verdict.indexOf("看空") >= 0;
+  text = text || "";
+  var base = (data && data.text) || "";   // 規則式完整報告；AI 版本沒有的段落由它補上
+  function S(name, alt) { return parseSection(text, name) || (alt ? parseSection(text, alt) : "") || parseSection(base, name); }
+  var verdict = S("最終裁定");
+  var isBull = data.stance ? data.stance === "偏多" : (verdict.indexOf("偏多") >= 0 || verdict.indexOf("看多") >= 0);
+  var isBear = data.stance ? data.stance === "偏空" : (verdict.indexOf("偏空") >= 0 || verdict.indexOf("看空") >= 0);
   var vCls = isBull ? "bull" : isBear ? "bear" : "neut";
   var dirText = isBull ? "整體偏多" : isBear ? "整體偏空" : "中性震盪";
   var dirCls = isBull ? "up" : isBear ? "dn" : "neu";
   var barPct = isBull ? "72%" : isBear ? "28%" : "50%";
   var barType = isBull ? "bull" : isBear ? "bear" : "neutral";
   var stockName = code;
-  var nm = (sec.overview || "").match(/名稱[：:]\s*([^\s、，\n]{2,8})/);
+  var nm = (S("行情總覽") || "").match(/名稱[：:]\s*([^\s、，（(\n]{2,12})/);
   if (nm && nm[1] && nm[1] !== code) stockName = nm[1];
-  var priceMatch = text ? text.match(/(?:收盤|股價|現價)[：:\s]*([\d,]+\.?\d*)/) : null;
-  var price = priceMatch ? priceMatch[1] : "—";
-  var chgText = dirText, chgCls = dirCls, metaText = new Date().toLocaleDateString("zh-TW");
+  var price = "—", chgText = dirText, chgCls = dirCls, metaText = new Date().toLocaleDateString("zh-TW");
   if (q && q.price) {
     if (q.name) stockName = q.name;
     price = Number(q.price).toLocaleString("en-US", {maximumFractionDigits: 2});
     var cp = Number(q.changePct) || 0, ch = Number(q.change) || 0;
     chgCls = cp > 0 ? "up" : cp < 0 ? "dn" : "neu";   // 台股慣例：紅漲綠跌
     chgText = (ch > 0 ? "▲ +" : ch < 0 ? "▼ " : "") + ch.toLocaleString("en-US", {maximumFractionDigits: 2}) + "（" + (cp > 0 ? "+" : "") + cp.toFixed(2) + "%）";
-    metaText = [q.market, q.industry, (q.time || q.date || ""), q.realtime ? "盤中即時" : "日收盤"].filter(Boolean).join(" · ");
+    metaText = [q.market, q.industry, (q.time || q.date || ""), q.realtime ? "盤中即時" : "收盤"].filter(Boolean).join(" · ");
   }
   if (data.code) code = data.code;
+
+  // 標籤：優先用後端的結構化結果；舊版後端才退回掃描文字
   var tags = "";
-  if (isBull) tags += '<span class="tag tag-bull">整體偏多</span>';
-  if (isBear) tags += '<span class="tag tag-bear">整體偏空</span>';
-  if (!isBull && !isBear) tags += '<span class="tag tag-neutral">中性震盪</span>';
-  if (text.indexOf("多頭排列") >= 0) tags += '<span class="tag tag-bull">多頭排列</span>';
-  if (text.indexOf("空頭排列") >= 0) tags += '<span class="tag tag-bear">空頭排列</span>';
-  if (text.indexOf("黃金交叉") >= 0) tags += '<span class="tag tag-bull">黃金交叉</span>';
-  if (text.indexOf("死亡交叉") >= 0) tags += '<span class="tag tag-bear">死亡交叉</span>';
-  if (text.indexOf("爆量") >= 0) tags += '<span class="tag tag-hot">爆量</span>';
-  if (text.indexOf("過熱") >= 0) tags += '<span class="tag tag-warn">RSI 過熱</span>';
-  if (text.indexOf("超賣") >= 0) tags += '<span class="tag tag-bull">RSI 超賣</span>';
+  if (data.tags && data.tags.length) {
+    var TAGCLS = {bull:"tag-bull", bear:"tag-bear", neutral:"tag-neutral", warn:"tag-warn", hot:"tag-hot"};
+    tags = data.tags.map(function(t) { return '<span class="tag ' + (TAGCLS[t.cls] || "tag-neutral") + '">' + esc(t.text) + '</span>'; }).join("");
+  } else {
+    tags += '<span class="tag ' + (isBull ? "tag-bull" : isBear ? "tag-bear" : "tag-neutral") + '">' + dirText + '</span>';
+    [["多頭排列","tag-bull"],["空頭排列","tag-bear"],["黃金交叉","tag-bull"],["死亡交叉","tag-bear"],["爆量","tag-hot"]].forEach(function(k) {
+      if (text.indexOf(k[0]) >= 0) tags += '<span class="tag ' + k[1] + '">' + k[0] + '</span>';
+    });
+  }
   var links = [
-    ["Yahoo 股市","https://tw.stock.yahoo.com/quote/"+code+".TW"],
-    ["Goodinfo","https://goodinfo.tw/StockInfo/StockDetail.asp?STOCK_ID="+code],
-    ["鉅亨網","https://www.cnyes.com/twstock/"+code],
-    ["CMoney","https://www.cmoney.tw/finance/"+code],
+    ["Yahoo 股市","https://tw.stock.yahoo.com/quote/"+encodeURIComponent(code)+".TW"],
+    ["Goodinfo","https://goodinfo.tw/StockInfo/StockDetail.asp?STOCK_ID="+encodeURIComponent(code)],
+    ["鉅亨網","https://www.cnyes.com/twstock/"+encodeURIComponent(code)],
+    ["CMoney","https://www.cmoney.tw/finance/"+encodeURIComponent(code)],
     ["公開觀測站","https://mops.twse.com.tw"],
-    ["TradingView","https://www.tradingview.com/chart/?symbol=TWSE:"+code]
-  ].map(function(l) { return '<a class="link-btn" href="' + l[1] + '" target="_blank">' + l[0] + '</a>'; }).join("");
+    ["TradingView","https://www.tradingview.com/chart/?symbol=TWSE:"+encodeURIComponent(code)]
+  ].map(function(l) { return '<a class="link-btn" href="' + l[1] + '" target="_blank" rel="noopener">' + l[0] + '</a>'; }).join("");
   var chipLinks = [
-    ["三大法人","https://www.twse.com.tw/fund/TWT38U?response=html&stockNo="+code],
-    ["融資融券","https://www.twse.com.tw/exchangeReport/MI_MARGN?response=html&stockNo="+code],
-    ["主力分點","https://goodinfo.tw/StockInfo/StockBrokerTradeSum.asp?STOCK_ID="+code]
-  ].map(function(l) { return '<a class="link-btn" href="' + l[1] + '" target="_blank">' + l[0] + '</a>'; }).join("");
+    ["三大法人","https://www.twse.com.tw/fund/TWT38U?response=html&stockNo="+encodeURIComponent(code)],
+    ["融資融券","https://www.twse.com.tw/exchangeReport/MI_MARGN?response=html&stockNo="+encodeURIComponent(code)],
+    ["主力分點","https://goodinfo.tw/StockInfo/StockBrokerTradeSum.asp?STOCK_ID="+encodeURIComponent(code)]
+  ].map(function(l) { return '<a class="link-btn" href="' + l[1] + '" target="_blank" rel="noopener">' + l[0] + '</a>'; }).join("");
+
+  function card(title, body) { return body ? '<div class="card"><div class="card-title">' + title + '</div><div class="ai-text">' + richHTML(body) + '</div></div>' : ""; }
+  function linkCard(title, inner) { return '<div class="card"><div class="card-title">' + title + '</div><div class="links">' + inner + '</div></div>'; }
+  // 新聞：有結構化資料時做成可點的連結（只接受 http/https）
+  var newsCard = "";
+  if (data.news && data.news.length) {
+    newsCard = '<div class="card"><div class="card-title">近期新聞</div><div class="ai-text">' + data.news.map(function(n) {
+      var href = /^https?:\/\//.test(n.link || "") ? esc(n.link) : "";
+      return '<div class="news-item"><span class="news-date">' + esc(n.date) + '</span>' + (href ? '<a href="' + href + '" target="_blank" rel="noopener noreferrer">' + esc(n.title) + '</a>' : esc(n.title)) + (n.source ? ' <span class="news-src">' + esc(n.source) + '</span>' : '') + '</div>';
+    }).join("") + '<div class="note" style="text-align:left">系統只列出標題、不判讀內容；重大訊息請以公開資訊觀測站為準。</div></div></div>';
+  } else newsCard = card("近期新聞", S("近期新聞"));
+
+  var cov = data.coverage || null, covPct = cov ? Math.round(cov.got / cov.total * 100) : Math.min(100, Math.round((text || base).length / 120));
+  var PANES = [
+    card("行情總覽", S("行情總覽")) + card("多週期績效（相對大盤）", S("多週期績效")) + card("支撐壓力", S("支撐壓力")) + card("位階分析", S("位階分析")) + linkCard("即時查詢", links),
+    card("技術分析", S("技術分析")) + card("趨勢結構檢核", S("趨勢結構檢核")) + card("長線趨勢分析", S("長線趨勢分析")) + card("市場風格判定", S("市場風格判定")) + card("歷史訊號統計（量化回算）", S("歷史訊號統計")),
+    card("短線分析（1~5日）", S("短線分析")) + card("中線分析（1~8週）", S("中線分析")) + card("長線分析（3~12個月）", S("長線分析")),
+    card("籌碼分析", S("籌碼分析")) + card("籌碼屬性分析", S("籌碼屬性分析")) + card("法人分析", S("法人分析")) + card("外資持股", S("外資持股")) + card("融資融券分析", S("融資融券分析")) + linkCard("官方資料", chipLinks),
+    card("基本面分析（月營收）", S("基本面分析")) + card("獲利能力（季財報）", S("獲利能力")) + card("估值分析", S("估值分析")) + card("股利政策", S("股利政策")) + card("產業分析", S("產業分析")) + newsCard,
+    card("風險分析", S("風險分析")) + card("量化風險指標", S("量化風險指標")) + card("部位規模試算", S("部位規模試算")),
+    card("操作策略（情境推演）", S("操作策略")) + card("交易員檢核表", S("交易員檢核表")) + card("量化因子", S("量化因子"))
+      + '<div class="ai-block"><div class="ai-header"><div class="ai-dot"></div><span class="ai-title-txt">綜合分析 — ' + esc(code) + ' ' + esc(stockName) + '</span></div><div class="ai-text">' + richHTML(S("AI綜合分析", "綜合分析")) + '</div></div>'
+      + '<div class="verdict ' + vCls + '"><div class="verdict-title">最終裁定</div><div class="ai-text">' + richHTML(verdict) + '</div></div>'
+      + '<div class="note">' + (data.demo ? '⚠ 目前為示範資料模式，數字並非真實行情。' : '本報告由 TWSE／TPEx + FinMind 資料生成') + '，僅供參考，不構成投資建議。評分與裁定規則未經完整回測驗證。股市有風險，投資需自負。</div>'
+  ];
 
   var html = scoreCard + '<div class="hero fade-up">'
     + '<div class="hero-top">'
@@ -810,51 +825,16 @@ function renderReport(code, text, scored, data, isAI) {
     + '</div>'
     + '<div class="score-bars">'
     + '<div class="score-bar"><div class="bar-label">多空判斷</div><div class="bar-track"><div class="bar-fill ' + barType + '" style="width:' + barPct + '"></div></div><div class="bar-vals"><span style="color:var(--red)">偏空</span><span>' + dirText + '</span><span style="color:var(--green)">偏多</span></div></div>'
-    + '<div class="score-bar"><div class="bar-label">分析完整度</div><div class="bar-track"><div class="bar-fill neutral" style="width:' + Math.min(100,Math.round(text.length/80)) + '%"></div></div><div class="bar-vals"><span></span><span>' + text.length + ' 字</span><span></span></div></div>'
+    + '<div class="score-bar"><div class="bar-label">資料完整度</div><div class="bar-track"><div class="bar-fill neutral" style="width:' + covPct + '%"></div></div><div class="bar-vals"><span></span><span>' + (cov ? cov.got + ' / ' + cov.total + ' 個資料源' : '') + '</span><span></span></div></div>'
     + '</div>'
-    + '<div class="tags">' + tags + '<span class="tag tag-neutral">' + (isAI ? "AI 深度分析" : "規則式分析") + '</span></div>'
-    + (data.missing && data.missing.length ? '<div class="note" style="text-align:left;color:var(--yellow);margin-top:8px">⚠ 部分資料暫時無法取得（' + esc(data.missing.join("、")) + '），對應評分項目以「—」表示、未計入得分。</div>' : "")
+    + '<div class="tags">' + tags + '<span class="tag tag-neutral">' + (isAI ? "AI 解讀＋量化分析" : "規則式量化分析") + '</span></div>'
+    + (data.missing && data.missing.length ? '<div class="note" style="text-align:left;color:var(--yellow);margin-top:8px">⚠ 部分資料暫時無法取得（' + esc(data.missing.join("、")) + '），對應段落與評分項目未計入。</div>' : "")
     + '<div class="note" id="aiStatus" style="display:none;text-align:left;color:var(--accent2);margin-top:8px"></div>'
     + '</div>'
     + '<div class="tabs-wrap fade-up">'
     + TABS.map(function(l,i) { return '<button class="tab-btn ' + (i===0?"on":"") + '" onclick="switchTab(' + i + ')">' + l + '</button>'; }).join("")
     + '</div>'
-    + '<div class="tab-pane on fade-up" id="tp0">'
-    + '<div class="card"><div class="card-title">行情總覽</div><div class="ai-text">' + richHTML(sec.overview) + '</div></div>'
-    + '<div class="card"><div class="card-title">支撐壓力</div><div class="ai-text">' + richHTML(sec.levels) + '</div></div>'
-    + '<div class="card"><div class="card-title">位階分析</div><div class="ai-text">' + richHTML(sec.position) + '</div></div>'
-    + '<div class="card"><div class="card-title">即時查詢</div><div class="links">' + links + '</div></div>'
-    + '</div>'
-    + '<div class="tab-pane" id="tp1">'
-    + '<div class="card"><div class="card-title">技術分析</div><div class="ai-text">' + richHTML(sec.tech) + '</div></div>'
-    + '<div class="card"><div class="card-title">長線趨勢分析</div><div class="ai-text">' + richHTML(sec.longtrend) + '</div></div>'
-    + '<div class="card"><div class="card-title">市場風格判定</div><div class="ai-text">' + richHTML(sec.market) + '</div></div>'
-    + '</div>'
-    + '<div class="tab-pane" id="tp2">'
-    + '<div class="card"><div class="card-title">短線分析（1~5日）</div><div class="ai-text">' + richHTML(sec.short) + '</div></div>'
-    + '<div class="card"><div class="card-title">中線分析（1~8週）</div><div class="ai-text">' + richHTML(sec.mid) + '</div></div>'
-    + '<div class="card"><div class="card-title">長線分析（3~12個月）</div><div class="ai-text">' + richHTML(sec.longanalysis) + '</div></div>'
-    + '</div>'
-    + '<div class="tab-pane" id="tp3">'
-    + '<div class="card"><div class="card-title">籌碼分析</div><div class="ai-text">' + richHTML(sec.chip) + '</div></div>'
-    + '<div class="card"><div class="card-title">籌碼屬性分析</div><div class="ai-text">' + richHTML(sec.chiptype) + '</div></div>'
-    + '<div class="card"><div class="card-title">法人分析</div><div class="ai-text">' + richHTML(sec.legal) + '</div></div>'
-    + '<div class="card"><div class="card-title">融資融券分析</div><div class="ai-text">' + richHTML(sec.margin) + '</div></div>'
-    + '<div class="card"><div class="card-title">官方資料</div><div class="links">' + chipLinks + '</div></div>'
-    + '</div>'
-    + '<div class="tab-pane" id="tp4">'
-    + '<div class="card"><div class="card-title">基本面分析</div><div class="ai-text">' + richHTML(sec.fund) + '</div></div>'
-    + '<div class="card"><div class="card-title">產業分析</div><div class="ai-text">' + richHTML(sec.industry) + '</div></div>'
-    + '</div>'
-    + '<div class="tab-pane" id="tp5">'
-    + '<div class="card"><div class="card-title">風險分析</div><div class="ai-text">' + richHTML(sec.risk) + '</div></div>'
-    + '</div>'
-    + '<div class="tab-pane" id="tp6">'
-    + '<div class="card"><div class="card-title">操作策略</div><div class="ai-text">' + richHTML(sec.strategy) + '</div></div>'
-    + '<div class="ai-block"><div class="ai-header"><div class="ai-dot"></div><span class="ai-title-txt">綜合分析 — ' + esc(code) + ' ' + esc(stockName) + '</span></div><div class="ai-text">' + richHTML(sec.ai) + '</div></div>'
-    + '<div class="verdict ' + vCls + '"><div class="verdict-title">最終裁定</div><div class="ai-text">' + richHTML(sec.verdict) + '</div></div>'
-    + '<div class="note">' + (data.demo ? '⚠ 目前為示範資料模式，數字並非真實行情。' : '本報告由 TWSE／TPEx + FinMind 資料生成') + '，僅供參考，不構成投資建議。評分模型未經回測驗證其預測力。股市有風險，投資需自負。</div>'
-    + '</div>';
+    + PANES.map(function(p, i) { return '<div class="tab-pane' + (i === 0 ? ' on fade-up' : '') + '" id="tp' + i + '">' + p + '</div>'; }).join("");
 
   document.getElementById("result").innerHTML = html;
 }

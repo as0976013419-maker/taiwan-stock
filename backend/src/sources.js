@@ -199,7 +199,7 @@ async function getHistory(code, start, end) {
 /** 近 N 日三大法人買賣超（張），舊→新 */
 async function getChip(code) {
   return cached(`chip:${code}`, 2 * HOUR, async () => {
-    const rows = await finmind("TaiwanStockInstitutionalInvestorsBuySell", code, daysAgo(45));
+    const rows = await finmind("TaiwanStockInstitutionalInvestorsBuySell", code, daysAgo(100));
     const by = new Map();
     for (const r of rows) {
       const d = by.get(r.date) || { date: r.date, foreign: 0, trust: 0, dealer: 0 };
@@ -213,34 +213,94 @@ async function getChip(code) {
 /** 近 N 日融資融券餘額（張），舊→新 */
 async function getMargin(code) {
   return cached(`margin:${code}`, 2 * HOUR, async () => {
-    const rows = await finmind("TaiwanStockMarginPurchaseShortSale", code, daysAgo(45));
+    const rows = await finmind("TaiwanStockMarginPurchaseShortSale", code, daysAgo(100));
     return rows.sort((a, b) => a.date.localeCompare(b.date)).map((r) => ({
       date: r.date, bal: +r.MarginPurchaseTodayBalance || 0, limit: +r.MarginPurchaseLimit || 0, shortBal: +r.ShortSaleTodayBalance || 0,
     }));
   });
 }
-/** 月營收（近 15 個月）→ 最新月的 YoY／MoM 與近 3 月 YoY */
+/** 月營收（近 26 個月）→ 最新月 YoY／MoM、近 12 個月明細、今年累計年增 */
 async function getRevenue(code) {
   return cached(`rev:${code}`, 6 * HOUR, async () => {
-    const rows = (await finmind("TaiwanStockMonthRevenue", code, daysAgo(520))).sort((a, b) => a.date.localeCompare(b.date));
+    const rows = (await finmind("TaiwanStockMonthRevenue", code, daysAgo(820))).sort((a, b) => a.date.localeCompare(b.date));
     if (rows.length < 2) return null;
-    const key = (r) => r.revenue_year + "-" + r.revenue_month, map = new Map(rows.map((r) => [key(r), +r.revenue]));
-    const yoyOf = (r) => { const p = map.get((r.revenue_year - 1) + "-" + r.revenue_month); return p > 0 ? (+r.revenue / p - 1) * 100 : null; };
-    const last = rows[rows.length - 1], prev = rows[rows.length - 2];
-    return {
-      ym: last.revenue_year + "/" + String(last.revenue_month).padStart(2, "0"), revenue: +last.revenue,
-      yoy: round(yoyOf(last)), mom: prev && +prev.revenue > 0 ? round((+last.revenue / +prev.revenue - 1) * 100) : null,
-      yoy3: rows.slice(-3).map((r) => round(yoyOf(r))),
-    };
+    const key = (y, m) => y + "-" + m, map = new Map(rows.map((r) => [key(r.revenue_year, r.revenue_month), +r.revenue]));
+    const yoyOf = (r) => { const p = map.get(key(r.revenue_year - 1, r.revenue_month)); return p > 0 ? (+r.revenue / p - 1) * 100 : null; };
+    const months = rows.map((r, i) => ({ ym: r.revenue_year + "/" + String(r.revenue_month).padStart(2, "0"), revenue: +r.revenue, yoy: round(yoyOf(r)), mom: i && +rows[i - 1].revenue > 0 ? round((+r.revenue / +rows[i - 1].revenue - 1) * 100) : null })).slice(-12);
+    const last = rows[rows.length - 1], L = months[months.length - 1];
+    let ytd = 0, ytdPrev = 0; for (let m = 1; m <= last.revenue_month; m++) { ytd += map.get(key(last.revenue_year, m)) || 0; ytdPrev += map.get(key(last.revenue_year - 1, m)) || 0; }
+    return { ym: L.ym, revenue: L.revenue, yoy: L.yoy, mom: L.mom, yoy3: months.slice(-3).map((m) => m.yoy), months, ytdYoY: ytdPrev > 0 ? round((ytd / ytdPrev - 1) * 100) : null,
+      newHigh: L.revenue >= Math.max(...rows.map((r) => +r.revenue)) };
   });
 }
+/** 近五年每日本益比／淨值比／殖利率（用來算「目前估值在自身歷史的位置」） */
 async function getPER(code) {
-  return cached(`per:${code}`, 6 * HOUR, async () => {
-    const rows = await finmind("TaiwanStockPER", code, daysAgo(14));
+  return cached(`per:${code}`, 12 * HOUR, async () => {
+    const rows = await finmind("TaiwanStockPER", code, daysAgo(1830));
     const r = rows[rows.length - 1]; if (!r) return null;
-    return { pe: +r.PER || null, pb: +r.PBR || null, yield: +r.dividend_yield || null, date: r.date };
+    return { pe: +r.PER || null, pb: +r.PBR || null, yield: +r.dividend_yield || null, date: r.date,
+      hist: { pe: rows.map((x) => +x.PER).filter((x) => x > 0), pb: rows.map((x) => +x.PBR).filter((x) => x > 0), yield: rows.map((x) => +x.dividend_yield).filter((x) => x > 0), from: rows[0].date } };
   });
 }
+/** 近 9 季損益表：營收、毛利、營業利益、稅後淨利、EPS（單季） */
+async function getFinancials(code) {
+  return cached(`fin:${code}`, 24 * HOUR, async () => {
+    const rows = await finmind("TaiwanStockFinancialStatements", code, daysAgo(900));
+    const by = new Map();
+    for (const r of rows) { const q = by.get(r.date) || { date: r.date }; q[r.type] = +r.value; by.set(r.date, q); }
+    const qs = [...by.values()].sort((a, b) => a.date.localeCompare(b.date)).map((q) => {
+      const rev = q.Revenue, ni = pick(q, ["IncomeAfterTaxes", "IncomeAfterTax", "EquityAttributableToOwnersOfParent"]);
+      const d = new Date(q.date), label = d.getFullYear() + "Q" + (Math.floor(d.getMonth() / 3) + 1);
+      return { date: q.date, label, revenue: rev || null, gross: q.GrossProfit === undefined ? null : q.GrossProfit, opInc: q.OperatingIncome === undefined ? null : q.OperatingIncome, netInc: ni === undefined ? null : ni, eps: q.EPS === undefined ? null : q.EPS,
+        gm: rev > 0 && q.GrossProfit !== undefined ? round(q.GrossProfit / rev * 100, 1) : null, om: rev > 0 && q.OperatingIncome !== undefined ? round(q.OperatingIncome / rev * 100, 1) : null, nm: rev > 0 && ni !== undefined ? round(ni / rev * 100, 1) : null };
+    });
+    return qs.length ? qs.slice(-9) : null;
+  });
+}
+/** 最新一季資產負債表重點 */
+async function getBalance(code) {
+  return cached(`bs:${code}`, 24 * HOUR, async () => {
+    const rows = await finmind("TaiwanStockBalanceSheet", code, daysAgo(420)); if (!rows.length) return null;
+    const last = rows.map((r) => r.date).sort().pop(), q = {}; for (const r of rows) if (r.date === last && !/_per$/.test(r.type)) q[r.type] = +r.value;
+    const equity = pick(q, ["Equity", "EquityAttributableToOwnersOfParent", "TotalEquity"]), liab = pick(q, ["Liabilities", "TotalLiabilities"]);
+    return { date: last, assets: q.TotalAssets || null, liabilities: liab || null, equity: equity || (q.TotalAssets && liab ? q.TotalAssets - liab : null), curAssets: q.CurrentAssets || null, curLiab: q.CurrentLiabilities || null, cash: q.CashAndCashEquivalents || null, inventory: q.Inventories || null };
+  });
+}
+/** 近四年現金／股票股利（依除息年度加總） */
+async function getDividends(code) {
+  return cached(`div:${code}`, 24 * HOUR, async () => {
+    const rows = await finmind("TaiwanStockDividend", code, daysAgo(1500)); if (!rows.length) return null;
+    const by = new Map(); let lastEx = null;
+    for (const r of rows) {
+      const cash = (+r.CashEarningsDistribution || 0) + (+r.CashStatutorySurplus || 0), stock = (+r.StockEarningsDistribution || 0) + (+r.StockStatutorySurplus || 0);
+      const ex = r.CashExDividendTradingDate || r.StockExDividendTradingDate || r.date, y = String(ex).slice(0, 4);
+      const o = by.get(y) || { year: y, cash: 0, stock: 0, times: 0 }; o.cash += cash; o.stock += stock; o.times++; by.set(y, o);
+      if (r.CashExDividendTradingDate && (!lastEx || r.CashExDividendTradingDate > lastEx.date)) lastEx = { date: r.CashExDividendTradingDate, cash: round(cash, 3), period: r.year };
+    }
+    return { years: [...by.values()].sort((a, b) => a.year.localeCompare(b.year)).map((o) => ({ year: o.year, cash: round(o.cash, 3), stock: round(o.stock, 3), times: o.times })), lastEx };
+  });
+}
+/** 外資持股比例與發行股數 */
+async function getHolding(code) {
+  return cached(`hold:${code}`, 6 * HOUR, async () => {
+    const rows = (await finmind("TaiwanStockShareholding", code, daysAgo(100))).sort((a, b) => a.date.localeCompare(b.date)); if (!rows.length) return null;
+    const L = rows[rows.length - 1], at = (k) => rows[Math.max(0, rows.length - 1 - k)];
+    return { date: L.date, ratio: +L.ForeignInvestmentSharesRatio, ratio5: +at(5).ForeignInvestmentSharesRatio, ratio20: +at(20).ForeignInvestmentSharesRatio, ratio60: +at(60).ForeignInvestmentSharesRatio, shares: +L.NumberOfSharesIssued || null };
+  });
+}
+/** 近三日新聞標題（排除論壇貼文與個股概覽頁） */
+async function getNews(code) {
+  return cached(`news:${code}`, HOUR, async () => {
+    const rows = await finmind("TaiwanStockNews", code, daysAgo(3)); const seen = new Set(), out = [];
+    for (const r of rows.sort((a, b) => b.date.localeCompare(a.date))) {
+      const t = String(r.title || "").replace(/\s+/g, " ").trim(); if (!t || /forum|同學會|個股概覽|爆料/.test(r.link + t) || seen.has(t)) continue;
+      if (!/^https?:\/\//.test(r.link || "")) continue; seen.add(t); out.push({ date: String(r.date).slice(0, 16), title: t.slice(0, 80), source: r.source || "", link: r.link }); if (out.length >= 8) break;
+    }
+    return out;
+  });
+}
+/** 加權指數日 K（全站共用一份） */
+async function getIndex() { return getHistory("TAIEX", daysAgo(1900)); }
 /** 盤中即時報價（TWSE MIS）；失敗回 null，由呼叫端退回日收盤快照 */
 async function getQuote(code) {
   return cached(`quote:${code}`, 20000, async () => {
@@ -278,4 +338,4 @@ async function getDisposition() {
   });
 }
 
-module.exports = { demo: false, finmindLimited, getMarketSnapshot, getHistory, getChip, getMargin, getRevenue, getPER, getQuote, getDisposition };
+module.exports = { demo: false, finmindLimited, getMarketSnapshot, getHistory, getChip, getMargin, getRevenue, getPER, getFinancials, getBalance, getDividends, getHolding, getNews, getIndex, getQuote, getDisposition };

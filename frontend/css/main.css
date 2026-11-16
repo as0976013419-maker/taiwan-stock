@@ -196,3 +196,13 @@ body{background:var(--bg);color:var(--text1);font-family:"Noto Sans TC",sans-ser
 .logo,.logo span{color:var(--text1)}
 .site-footer{max-width:1080px;margin:0 auto;padding:8px 20px 32px;font-family:"IBM Plex Mono",monospace;font-size:10px;color:var(--text3);text-align:center;line-height:1.8}
 @media print{.demo-banner,.site-footer{display:none !important}}
+
+/* ── v5.1：長表格可橫向捲動、新聞清單 ───────────────── */
+.ai-text{overflow-x:auto}
+.ai-text .data-table{margin:8px 0}
+.data-table th,.data-table td{white-space:nowrap}
+.data-table td:last-child,.data-table th:last-child{white-space:normal;min-width:120px}
+.news-item{padding:7px 0;border-bottom:1px solid var(--border);line-height:1.6}
+.news-item a{color:var(--text1);text-decoration:none}.news-item a:hover{color:var(--accent)}
+.news-date{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--text3);margin-right:10px}
+.news-src{font-size:11px;color:var(--text3)}

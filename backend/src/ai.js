@@ -22,7 +22,8 @@ ${SECTIONS.map((s) => "  === " + s).join("\n")}
 - 「操作策略」寫成情境推演：多方情境成立條件、空方情境成立條件、反證條件（什麼價位或事件代表目前看法失效）。
 - 「最終裁定」第一行必須以「偏多」「偏空」或「中性」其中一個詞開頭，並且整段只使用這一個方向詞；接著用兩三句說明最關鍵的依據與主要反方論點。
 - 網站會掃描全文關鍵字自動加上標籤，所以下列詞彙只有在數據確實符合時才可以出現，否定句也不要用（例如不要寫「尚未出現黃金交叉」）：多頭排列、空頭排列、黃金交叉、死亡交叉、爆量、過熱、超賣。
-- 全文約 1500～2500 字，每段聚焦在該段主題，不要在各段重複同樣的數字。`;
+- 網站另外會顯示由程式產生的量化表格（歷史訊號統計、量化風險指標、部位試算、交易方法檢核表等），你不需要重複製表；請把篇幅用在「解讀」：把 quant、financials 裡的數據串成因果與情境，指出數據之間互相印證或矛盾的地方。
+- 全文約 2500～4000 字，每段聚焦在該段主題，不要在各段重複同樣的數字。`;
 
 let _client = null;
 function enabled() { return !!process.env.ANTHROPIC_API_KEY; }
@@ -34,7 +35,9 @@ function client() {
 /** @returns {Promise<string|null>} 報告文字；模型拒答或格式不符時回 null（前端保留規則式報告） */
 async function generateReport(a) {
   const payload = { code: a.code, quote: a.quote, indicators: a.indicators, chip: a.chip ? a.chip.slice(-20) : null, margin: a.margin ? a.margin.slice(-10) : null,
-    fundamentals: a.fundamentals, revenue: a.revenue, sector: a.sector, scored: a.scored, missing: a.missing, recentBars: (a.history || []).slice(-20) };
+    fundamentals: a.fundamentals, revenue: a.revenue, sector: a.sector, scored: a.scored, missing: a.missing, recentBars: (a.history || []).slice(-20),
+    financials: a.financials, balance: a.balance, dividends: a.dividends, holding: a.holding, market: a.market, ruleStance: a.stance,
+    quant: a.quant ? { risk: a.quant.risk, relativeStrength: a.quant.rs, trendTemplate: a.quant.trend, turtle: a.quant.turtle, factors: a.quant.factors, events: a.quant.events ? { baseline: a.quant.events.baseline, active: a.quant.events.events.filter((e) => e.active) } : null } : null };
   const stream = client().beta.messages.stream({
     model: process.env.AI_MODEL || "claude-opus-5-5",
     max_tokens: 16000,
