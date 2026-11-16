@@ -104,7 +104,10 @@ function buildReport(a) {
     mkt ? `【大盤】加權指數 ${f(mkt.close, 0)}（${mkt.date}），位於 50 日均線${mkt.above50 ? "之上" : "之下"}、200 日均線${mkt.above200 ? "之上" : "之下"}；近 20 日 ${pc(mkt.ret20)}、近 60 日 ${pc(mkt.ret60)}。` : "",
     `資料時間：${q.time || q.date || "最近交易日"}${q.realtime ? "（盤中即時；成交量為當日累計，量能相關判斷改用前一完整交易日 " + (has && i.volAsOf ? i.volAsOf : "") + "）" : "（收盤）"}`,
     a.asOf ? `【各項資料日期】K 線 ${a.asOf.kline || "—"}｜法人 ${a.asOf.chip || "—"}｜融資券 ${a.asOf.margin || "—"}｜外資持股 ${a.asOf.holding || "—"}｜月營收 ${a.asOf.revenue || "—"}｜季財報 ${a.asOf.financials || "—"}｜大盤 ${a.asOf.index || "—"}｜族群與官方估值 ${a.asOf.snapshot || "—"}` : "",
-    a.adjust && a.adjust.splits.length ? `【價格還原】偵測到 ${a.adjust.splits.map((x) => x.date + " 股數變動（約 " + x.ratio + " 倍）").join("、")}：單日變動超過漲跌幅限制且非股利造成，判定為分割或減資，已依當日價格比還原歷史價格。倍數為系統估算，非官方公告值。` : "",
+    a.adjust && a.adjust.splits.length ? `【價格還原】依官方公告還原股數變動：${a.adjust.splits.map((x) => x.date + " " + x.type + "（參考價 " + f(x.before) + " → " + f(x.after) + "，" + x.ratio + " 倍）").join("、")}。該日之前的歷史價格與成交量已換算成現在的股數基準；之後的價格就是實際成交價。` : "",
+    a.adjust && a.adjust.unexplained.length ? `【未還原的異常跳動】${a.adjust.unexplained.slice(0, 5).map((x) => x.date + "（" + pc(x.movePct, 1) + "）").join("、")}：單日變動超過 10% 漲跌幅限制，但查無分割、面額變更或減資公告，可能是無漲跌幅限制的商品、上市初期或恢復交易。系統未做任何還原，相關期間的報酬與波動統計請保守解讀。` : "",
+    a.adjust && !a.adjust.dividendsAvailable ? "【注意】股利資料暫時無法取得，本次的報酬、波動與歷史訊號統計未還原除息，除息日會被算成下跌。" : "",
+    a.adjust && !a.adjust.actionsAvailable ? "【注意】官方股數變動清單暫時無法取得，若這檔股票曾分割或變更面額，長期報酬與均線會失真。" : "",
   ]);
 
   if (rs) {

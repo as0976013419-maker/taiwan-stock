@@ -75,4 +75,5 @@ function ymd(d) { return d.getFullYear() + "-" + String(d.getMonth() + 1).padSta
 function taipeiNow() { return new Date(Date.now() + (8 * 60 + new Date().getTimezoneOffset()) * 60000); }
 function daysAgo(n) { const d = taipeiNow(); d.setDate(d.getDate() - n); return ymd(d); }
 
-module.exports = { cached, cacheAge, cacheSize, fetchJson, sleep, mapLimit, num, pick, round, clamp, pctStr, ymd, taipeiNow, daysAgo };
+function _test_clear() { _cache.clear(); }
+module.exports = { _test_clear, cached, cacheAge, cacheSize, fetchJson, sleep, mapLimit, num, pick, round, clamp, pctStr, ymd, taipeiNow, daysAgo };

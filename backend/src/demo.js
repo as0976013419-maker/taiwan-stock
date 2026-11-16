@@ -127,4 +127,4 @@ async function getQuote(code) { const s = (await getMarketSnapshot()).stocks.get
 async function getDisposition() {
   return [{ code: "4743", name: "合一", type: "處置股", reason: "連續三次達注意標準（示範）", period: "示範期間" }, { code: "6446", name: "藥華藥", type: "注意股", reason: "近六日累積漲幅異常（示範）", period: "" }];
 }
-module.exports = { demo: true, getMarketSnapshot, getHistory, getChip, getMargin, getRevenue, getPER, getFinancials, getBalance, getDividends, getHolding, getNews, getIndex, getQuote, getDisposition };
+module.exports = { demo: true, getMarketSnapshot, getHistory, getChip, getMargin, getRevenue, getPER, getFinancials, getBalance, getDividends, getHolding, getNews, getIndex, getSplitMap: async () => new Map(), getCapitalReductions: async () => [], getQuote, getDisposition };

@@ -14,26 +14,36 @@ const dailyRets = (c) => { const r = []; for (let i = 1; i < c.length; i++) r.pu
 
 /**
  * 價格還原。原始 K 線在除權息日與分割日會出現「假跳空」，直接拿來算報酬會把除息當成下跌、把分割當成崩盤。
- * 回傳兩條序列：
- *   price：只還原「股數變動」（股票股利、分割、減資）→ 用於均線、高低點、突破價等價位計算（除息缺口保留，與一般看盤軟體一致）
- *   total：再還原現金股利 → 用於報酬率、波動、回撤、事件統計
- * 分割／減資沒有官方事件資料時，以「單日變動超過 ±20%（漲跌幅限制為 10%）且非股利造成」偵測，
- * 並以當日價格比估算還原倍數——這是估計值，會在 notes 中註明。
+ * 回傳兩條序列（原始 hist 不會被修改）：
+ *   price：只還原「股數變動」（官方公告的分割／反分割／面額變更／減資，以及股票股利）
+ *          → 用於均線、高低點、突破價、ATR 等「價位」計算。最近一次股數變動之後的價格與原始成交價完全相同。
+ *   total：再還原現金股利 → 只用於報酬率、波動、回撤、事件統計，不可當成可交易價格。
+ * 股數變動「只採用官方公告資料」（actions）。偵測到超過漲跌幅限制、卻查無公告的單日變動時，
+ * 不做任何還原，只列入 unexplained 讓報告揭露——寧可留下缺口，也不自行估算倍數。
+ * @param divEvents [{date, cash, stock}]  現金股利（元／股）、股票股利（元／股，面額 10 元）
+ * @param actions   [{date, before, after}] 官方參考價：股數變動前收盤價 → 變動後參考價
  */
-function adjustPrices(hist, divEvents) {
+function adjustPrices(hist, divEvents, actions) {
   const { dates: d, opens: o, highs: h, lows: l, closes: c, volumes: v } = hist, n = c.length;
-  const ev = new Map(); for (const e of divEvents || []) { const x = ev.get(e.date) || { cash: 0, stock: 0 }; x.cash += e.cash || 0; x.stock += e.stock || 0; ev.set(e.date, x); }
-  const fS = new Array(n).fill(1), fD = new Array(n).fill(1), notes = []; let cs = 1, cd = 1, nDiv = 0;
+  const ev = new Map(), seen = new Set();
+  for (const e of divEvents || []) { // 同一筆股利重複出現時只計一次
+    const key = e.date + "|" + (e.cash || 0) + "|" + (e.stock || 0); if (seen.has(key)) continue; seen.add(key);
+    const x = ev.get(e.date) || { cash: 0, stock: 0 }; x.cash += e.cash || 0; x.stock += e.stock || 0; ev.set(e.date, x);
+  }
+  const act = new Map(); for (const x of actions || []) if (x.before > 0 && x.after > 0) act.set(x.date, x);
+  const fS = new Array(n).fill(1), fD = new Array(n).fill(1), splits = [], unexplained = []; let cs = 1, cd = 1, nDiv = 0, shareEvents = 0;
   for (let i = n - 1; i >= 1; i--) {
-    fS[i] = cs; fD[i] = cd; const prev = c[i - 1], e = ev.get(d[i]); let ref = prev, share = 1;
-    if (e && prev > 0) { if (e.cash > 0 && e.cash < prev) { cd *= (prev - e.cash) / prev; ref = prev - e.cash; nDiv++; } if (e.stock > 0) { share = 1 / (1 + e.stock / 10); ref *= share; } }
+    fS[i] = cs; fD[i] = cd; const prev = c[i - 1], e = ev.get(d[i]), ac = act.get(d[i]); let ref = prev, share = 1;
+    if (e && prev > 0) { if (e.cash > 0 && e.cash < prev) { cd *= (prev - e.cash) / prev; ref = prev - e.cash; nDiv++; } if (e.stock > 0) { share = 1 / (1 + e.stock / 10); ref *= share; shareEvents++; } }
+    if (ac) { const k = ac.after / ac.before; share *= k; ref *= k; splits.push({ date: d[i], ratio: round(ac.before / ac.after, 4), type: ac.type || "股數變動", before: ac.before, after: ac.after, official: true }); }
     const resid = ref > 0 ? c[i] / ref - 1 : 0;
-    if (i >= 10 && Math.abs(resid) > 0.2) { share *= c[i] / ref; notes.push({ date: d[i], ratio: round(ref / c[i], 3), estimated: true }); }
+    if (i >= 10 && Math.abs(resid) > 0.105) unexplained.push({ date: d[i], movePct: round(resid * 100, 1) }); // 超過 ±10% 漲跌幅限制又查無公告
     cs *= share;
   }
   fS[0] = cs; fD[0] = cd;
   const mk = (withDiv) => { const f = (i) => fS[i] * (withDiv ? fD[i] : 1); return { code: hist.code, dates: d, opens: o.map((x, i) => x * f(i)), highs: h.map((x, i) => x * f(i)), lows: l.map((x, i) => x * f(i)), closes: c.map((x, i) => x * f(i)), volumes: v.map((x, i) => x / fS[i]) }; };
-  return { price: mk(false), total: mk(true), splits: notes, dividendsApplied: nDiv, changed: notes.length > 0 || nDiv > 0 };
+  const changed = splits.length > 0 || shareEvents > 0; // 官方股數變動或配股：價位序列才需要換算
+  return { price: changed ? mk(false) : hist, total: changed || nDiv > 0 ? mk(true) : hist, splits, unexplained, dividendsApplied: nDiv, changed: changed || nDiv > 0 };
 }
 
 /** Wilder ATR，回傳最新值 */
@@ -43,13 +53,14 @@ function atr(h, l, c, p = 14) {
   let a = mean(tr.slice(0, p)); for (let i = p; i < tr.length; i++) a = (a * (p - 1) + tr[i]) / p; return a;
 }
 
-function riskMetrics(hist, idx) {
+function riskMetrics(hist, idx, priceHist) {
   const { closes: c, highs: h, lows: l, opens: o, volumes: v, dates: d } = hist, n = c.length; if (n < 60) return null;
+  const ph = priceHist || hist; // ATR 是「價位」概念（用來設停損與部位），必須用可交易價格；報酬類指標才用含息序列
   const win = Math.min(250, n - 1), r = dailyRets(c).slice(-win), ann = Math.sqrt(252);
   const volOf = (k) => (r.length >= k ? std(r.slice(-k)) * ann * 100 : null);
   // 最大回撤（近一年，收盤價）
   let peak = -Infinity, mdd = 0; for (let i = n - win - 1; i < n; i++) { if (c[i] > peak) peak = c[i]; mdd = Math.min(mdd, c[i] / peak - 1); }
-  const hi = Math.max(...c.slice(-win - 1)), a14 = atr(h, l, c, 14), a20 = atr(h, l, c, 20);
+  const hi = Math.max(...c.slice(-win - 1)), a14 = atr(ph.highs, ph.lows, ph.closes, 14), a20 = atr(ph.highs, ph.lows, ph.closes, 20), lastPx = ph.closes[ph.closes.length - 1];
   const var95 = quantile(r, 0.05), tail = r.filter((x) => x <= var95), neg = r.filter((x) => x < 0);
   const m = mean(r), s = std(r), dd = neg.length > 1 ? Math.sqrt(neg.reduce((t, x) => t + x * x, 0) / r.length) : null;
   let beta = null, corr = null;
@@ -59,9 +70,9 @@ function riskMetrics(hist, idx) {
     if (xs.length > 40) { const mx = mean(xs), my = mean(ys); let cov = 0, vx = 0, vy = 0; for (let i = 0; i < xs.length; i++) { cov += (xs[i] - mx) * (ys[i] - my); vx += (xs[i] - mx) ** 2; vy += (ys[i] - my) ** 2; } beta = vx > 0 ? cov / vx : null; corr = vx > 0 && vy > 0 ? cov / Math.sqrt(vx * vy) : null; }
   }
   const gaps = []; for (let i = n - win; i < n; i++) gaps.push(o[i] / c[i - 1] - 1);
-  const val20 = mean(c.slice(-20).map((x, i) => x * v[n - 20 + i]));
+  const val20 = mean(ph.closes.slice(-20).map((x, i) => x * ph.volumes[n - 20 + i])); // 成交值＝實際價格 × 實際股數
   return {
-    days: win, atr14: round(a14), atr20: round(a20), atrPct: a14 ? round(a14 / c[n - 1] * 100) : null,
+    days: win, atr14: round(a14), atr20: round(a20), atrPct: a14 ? round(a14 / lastPx * 100) : null,
     vol20: round(volOf(20), 1), vol60: round(volOf(60), 1), vol250: round(volOf(Math.min(250, r.length)), 1),
     maxDD: round(mdd * 100, 1), curDD: round((c[n - 1] / hi - 1) * 100, 1),
     var95: round(var95 * 100), cvar95: round(mean(tail) * 100), worstDay: round(Math.min(...r) * 100), bestDay: round(Math.max(...r) * 100),

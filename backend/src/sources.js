@@ -301,6 +301,26 @@ async function getNews(code) {
     return out;
   });
 }
+/**
+ * 官方股數變動清單（分割、反分割、面額變更）：全市場一次取得、快取 24 小時，所有股票共用，不佔逐檔額度。
+ * @returns Map<code, [{date, before, after, type}]>
+ */
+async function getSplitMap() {
+  return cached("splits:all", 24 * HOUR, async () => {
+    const url = `${FINMIND}?dataset=TaiwanStockSplitPrice&start_date=${daysAgo(2000)}`, headers = process.env.FINMIND_TOKEN ? { Authorization: "Bearer " + process.env.FINMIND_TOKEN } : {};
+    const j = await fetchJson(url, { timeout: 20000, headers, retries: 0 }); if (j && j.status && j.status !== 200) throw new Error("FinMind：" + (j.msg || j.status));
+    const m = new Map();
+    for (const r of (j && j.data) || []) { const b = +r.before_price, a = +r.after_price; if (!(b > 0 && a > 0)) continue; const arr = m.get(r.stock_id) || []; arr.push({ date: r.date, before: b, after: a, type: String(r.type || "").trim() || "股數變動" }); m.set(r.stock_id, arr); }
+    return m;
+  });
+}
+/** 個股減資參考價（只有在出現「超過漲跌幅限制且查無分割公告」的跳動時才查詢） */
+async function getCapitalReductions(code) {
+  return cached(`reduce:${code}`, 24 * HOUR, async () => {
+    const rows = await finmind("TaiwanStockCapitalReductionReferencePrice", code, daysAgo(2000));
+    return rows.map((r) => ({ date: r.date, before: +pick(r, ["ClosingPriceonTheLastTradingDay", "before_price"]), after: +pick(r, ["PostReductionReferencePrice", "after_price"]), type: "減資" })).filter((x) => x.before > 0 && x.after > 0);
+  });
+}
 /** 加權指數日 K（全站共用一份） */
 async function getIndex() { return getHistory("TAIEX", daysAgo(1900)); }
 /** 盤中即時報價（TWSE MIS）；失敗回 null，由呼叫端退回日收盤快照 */
@@ -340,4 +360,4 @@ async function getDisposition() {
   });
 }
 
-module.exports = { demo: false, finmindLimited, getMarketSnapshot, getHistory, getChip, getMargin, getRevenue, getPER, getFinancials, getBalance, getDividends, getHolding, getNews, getIndex, getQuote, getDisposition };
+module.exports = { demo: false, finmindLimited, getMarketSnapshot, getHistory, getChip, getMargin, getRevenue, getPER, getFinancials, getBalance, getDividends, getHolding, getNews, getIndex, getSplitMap, getCapitalReductions, getQuote, getDisposition };

@@ -13,6 +13,7 @@ const DEMO = process.env.DEMO === "1";
 const src = DEMO ? require("./src/demo") : require("./src/sources");
 const { runScan } = require("./src/scan");
 const { analyze } = require("./src/analyze");
+const { adjustPrices } = require("./src/quant");
 const ai = require("./src/ai");
 
 const PORT = process.env.PORT || 3001;
@@ -71,8 +72,12 @@ async function api(req, res, url, ip) {
     const code = q.get("code"), start = q.get("start") || daysAgo(1100), end = q.get("end") || ymd(taipeiNow());
     if (!validCode(code) || !validDate(start) || !validDate(end) || start > end) return send(res, 400, { error: "參數錯誤：code=代號, start/end=YYYY-MM-DD" });
     if (limited(ip, "history", 60, 60000)) return send(res, 429, { error: "請求過於頻繁" });
-    const h = await src.getHistory(code.toUpperCase(), start, end);
-    return send(res, 200, Object.assign({}, h, { demo: DEMO }), { "Cache-Control": "public, max-age=300" });
+    const raw = await src.getHistory(code.toUpperCase(), start, end);
+    let h = raw, splitAdjusted = [];
+    try { const acts = src.getSplitMap ? (await src.getSplitMap()).get(code.toUpperCase()) : null;
+      if (acts && raw.closes.length > 1) { const a = adjustPrices(raw, null, acts); if (a.splits.length) { h = a.price; splitAdjusted = a.splits; } }
+    } catch (e) { /* 清單取不到：回傳原始價格，行為與舊版相同 */ }
+    return send(res, 200, Object.assign({}, h, { demo: DEMO, splitAdjusted }), { "Cache-Control": "public, max-age=300" });
   }
   if (p === "/analyze" && req.method === "POST") {
     if (limited(ip, "analyze", 30, 60000)) return send(res, 429, { error: "分析次數過於頻繁，請稍後再試" });
