@@ -104,7 +104,10 @@ function buildReport(a) {
   const s1 = sup[0], r1 = res[0];
 
   // ════════════ 行情 ════════════
-  const lu = q.prevClose ? limitUpPrice(q.prevClose, etf) : null;
+  // 今日漲停價：與異常跳動偵測使用同一份官方分類（不設漲跌幅／分類無法確認的商品不計算，不假設 10%）
+  const pl = (a.adjust && a.adjust.priceLimit) || Q.priceLimit(q.code, null, "沒有日 K 資料，未查詢分類");
+  const luRatio = pl.known && pl.limit !== null ? Math.round((pl.limit - 0.005) * 1e4) / 1e4 : null;
+  const lu = q.prevClose && luRatio ? limitUpPrice(q.prevClose, etf, luRatio) : null;
   // 各面向得分：不適用的面向寫「不適用」，不寫成 0 分
   // 不適用寫「不適用」、全部缺資料寫「資料不足」，都不寫成 0 分；部分缺資料時標示
   const part = (g, v, max) => { const st = groupState(sc, g); return st === "na" ? "不適用" : st === "missing" ? "資料不足" : `${v}/${max}${st === "partial" ? "（部分資料不足）" : ""}`; };
@@ -116,7 +119,7 @@ function buildReport(a) {
     "| 項目 | 數值 |", "|---|---|",
     `| 開盤 / 最高 / 最低 | ${f(q.open)} / ${f(q.high)} / ${f(q.low)} |`,
     `| 昨收 | ${f(q.prevClose)} |`,
-    lu ? `| 今日漲停價 | ${f(lu)}（距現價 ${pc((lu / P - 1) * 100, 1)}） |` : "",
+    lu ? `| 今日漲停價 | ${f(lu)}（${luRatio !== 0.1 ? "漲跌幅 " + Math.round(luRatio * 100) + "%；" : ""}距現價 ${pc((lu / P - 1) * 100, 1)}） |` : q.prevClose ? `| 今日漲停價 | ${pl.known ? "不適用：" : "未計算："}${pl.basis} |` : "",
     `| 成交量 | ${f(q.volume, 0)} 張${q.realtime ? "（盤中累計）" : has && i.vma20 ? "（20 日均量 " + f(i.vma20 / 1000, 0) + " 張的 " + f(i.volRatio, 2) + " 倍）" : ""} |`,
     q.value ? `| 成交金額 | ${yi(q.value)}（${q.valueSource || ""}，${q.date || ""}） |` : `| 成交金額 | —（${q.date || "當日"} 的官方成交金額尚未取得；不以其他日期的數字代替） |`,
     fu.marketCap ? `| 市值 | ${yi(fu.marketCap)} |` : "",

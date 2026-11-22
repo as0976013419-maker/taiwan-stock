@@ -6,8 +6,8 @@ const { clamp, round } = require("./util");
 
 const VERSION = "score-v5.1";
 const tickOf = (p, etf) => etf ? (p < 50 ? 0.01 : 0.05) : (p < 10 ? 0.01 : p < 50 ? 0.05 : p < 100 ? 0.1 : p < 500 ? 0.5 : p < 1000 ? 1 : 5);
-/** 漲停價：前收 ×1.10，向下取到升降單位 */
-function limitUpPrice(prev, etf) { const raw = prev * 1.1, t = tickOf(raw, etf); return round(Math.floor(raw / t + 1e-9) * t, 2); }
+/** 漲停價：前收 ×(1＋漲跌幅)，向下取到升降單位。ratio 預設 10%（一般股票）；ETF 由呼叫端依官方分類傳入（國內槓桿 2 倍為 0.2） */
+function limitUpPrice(prev, etf, ratio) { const raw = prev * (1 + (ratio > 0 ? ratio : 0.1)), t = tickOf(raw, etf); return round(Math.floor(raw / t + 1e-9) * t, 2); }
 
 /** 價格取到合法升降單位；dir=-1 向下、1 向上（停損價向下取，使停損距離不被低估） */
 function roundTick(p, etf, dir = -1) { if (!(p > 0)) return null; const t = tickOf(p, etf); return round((dir < 0 ? Math.floor(p / t + 1e-9) : Math.ceil(p / t - 1e-9)) * t, 2); }

@@ -418,10 +418,11 @@ test("漲跌幅限制依官方基金分類（不依代號字尾）：國內 10%�
     "00646": { type: "國外成分證券指數股票型基金", foreign: "是", name: "元大標普500傘型證券投資信託基金之標普500證券投資信託基金" },
     "00647L": { type: "槓桿/反向指數股票型基金", foreign: "是", name: "元大標普500傘型證券投資信託基金之標普500單日正向2倍證券投資信託基金" },
     "00635U": { type: "指數股票型期貨信託基金", foreign: "是", name: "元大標普高盛黃金ER指數股票型期貨信託基金" },
+    "00670L": { type: "槓桿/反向指數股票型基金", foreign: "是", name: "富邦NASDAQ-100 ETF 傘型證券投資信託基金之富邦NASDAQ-100單日正向兩倍證券投資信託基金" },
     "0061": { type: "連結式證券指數股票型基金", foreign: "是", name: "元大寶來滬深300證券投資信託基金" } };
   const L = (code) => Q.priceLimit(code, C[code]);
   assert.deepStrictEqual([L("2330").limit, L("0050").limit, L("00631L").limit, L("00675L").limit, L("00632R").limit], [0.105, 0.105, 0.205, 0.205, 0.105]);
-  for (const c of ["00646", "00647L", "00635U"]) { assert.strictEqual(L(c).limit, null, c); assert.strictEqual(L(c).known, true, c); assert.ok(/不設漲跌幅限制/.test(L(c).basis), c); }
+  for (const c of ["00646", "00647L", "00670L", "00635U"]) { assert.strictEqual(L(c).limit, null, c); assert.strictEqual(L(c).known, true, c); assert.ok(/不設漲跌幅限制/.test(L(c).basis), c); }
   for (const x of [L("0061"), Q.priceLimit("00679B", null), Q.priceLimit("0050", null, "證交所基金分類取得失敗"), Q.priceLimit("020020", null)]) { assert.strictEqual(x.known, false); assert.ok(/分類無法確認/.test(x.basis)); }
   const jump = (pct) => flat(40, (i) => (i < 20 ? 100 : 100 * (1 + pct)));
   const ux = (code, pct, cls) => Q.adjustPrices(jump(pct), [], [], Q.limitOpts(Q.priceLimit(code, cls === undefined ? C[code] : cls))).unexplained;
@@ -585,4 +586,18 @@ test("/history：回傳依官方分類判定的漲跌幅依據", async () => {
     assert.strictEqual(j.priceLimit.known, true); assert.strictEqual(j.priceLimit.limit, 0.105); assert.ok(/國內成分 ETF/.test(j.priceLimit.basis));
     const s = await (await fetch(`http://localhost:${port}/history?code=2330&start=2024-01-01&end=2030-01-01`)).json(); assert.ok(/一般股票/.test(s.priceLimit.basis)); }
   finally { await new Promise((r) => server.close(r)); }
+});
+
+test("行情總覽的「今日漲停價」與跳動偵測使用同一份官方分類：國外 ETF 不適用、國內槓桿 20%、分類不明不計算、一般股票不變", async () => {
+  const U = require("../src/util"), S2 = require("../src/scoring"), CLS = new Map([["00646", { type: "國外成分證券指數股票型基金", foreign: "是", name: "元大標普500傘型證券投資信託基金之標普500證券投資信託基金" }],
+    ["00631L", { type: "槓桿/反向指數股票型基金", foreign: "否", name: "元大ETF傘型證券投資信託基金之台灣50單日正向2倍證券投資信託基金" }]]);
+  const hist = async (c) => Object.assign(await demo.getHistory("0050", "2000-01-01"), { code: c }); // 測試資料：借用示範日 K
+  const src = (over) => srcWith(Object.assign({ getHistory: hist, getQuote: async () => null, getEtfClassMap: async () => CLS }, over));
+  const row = (a) => a.text.split("\n").find((l) => l.startsWith("| 今日漲停價"));
+  U._test_clear(); let a = await analyzeFn(src({}), "00646"); assert.ok(/^\| 今日漲停價 \| 不適用：含國外成分.*不設漲跌幅限制/.test(row(a)), row(a));
+  U._test_clear(); a = await analyzeFn(src({}), "00631L"); const want = S2.limitUpPrice(a.quote.prevClose, true, 0.2);
+  assert.ok(row(a).includes("漲跌幅 20%"), row(a)); assert.ok(Math.abs(want / a.quote.prevClose - 1.2) < 0.01); assert.ok(row(a).replace(/,/g, "").includes(String(want)), row(a) + " ≠ " + want);
+  U._test_clear(); a = await analyzeFn(src({ getEtfClassMap: async () => { throw new Error("down"); } }), "00646"); assert.ok(/^\| 今日漲停價 \| 未計算：漲跌幅分類無法確認/.test(row(a)), row(a));
+  U._test_clear(); a = await analyzeFn(demo, "2330"); assert.ok(row(a).replace(/,/g, "").startsWith(`| 今日漲停價 | ${S2.limitUpPrice(a.quote.prevClose, false)}（距現價`), row(a));
+  assert.strictEqual(S2.limitUpPrice(100, false), 110); assert.strictEqual(S2.limitUpPrice(50, true, 0.2), 60);
 });
