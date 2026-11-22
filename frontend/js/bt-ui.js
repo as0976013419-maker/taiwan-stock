@@ -569,13 +569,17 @@ function pfTxt(m) { return m.profitFactor >= 999 ? '無虧損交易' : fmtN(m.pr
 function diagHTML(dg, m, cfg) {
   if (!dg) return '';
   var lines = [];
-  lines.push('前 ' + (dg.warmup) + ' 根 K 線用於指標暖機、不交易；可交易期間自 ' + (dg.tradeFrom || '—') + ' 起。');
+  if (dg.preBars) lines.push('回測期間自 ' + dg.periodStart + ' 起（' + dg.bars + ' 個交易日）；另使用起始日前 ' + dg.preBars + ' 根 K 線計算指標，這段不交易、不計入績效。');
+  if (dg.startDelayed) lines.push('起始日前的資料不足 ' + dg.lookback + ' 根（指標所需回看長度），' + dg.tradeFrom + ' 之前不交易，但這段仍計入績效期間。');
+  else if (!dg.preBars) lines.push('前 ' + dg.warmup + ' 根 K 線用於指標暖機、不交易；可交易期間自 ' + (dg.tradeFrom || '—') + ' 起。');
+  if (dg.corpChecked === false) lines.push('⚠ 資料來自備援來源，未檢查分割、面額變更或減資等公司行動；若期間內發生，結果會失真。');
   lines.push('進場訊號 ' + dg.entrySignals + ' 次、出場訊號 ' + dg.exitSignals + ' 次；實際完成 ' + m.tradeCount + ' 筆交易。');
-  if (dg.rejected) lines.push('有 ' + dg.rejected + ' 次進場訊號未成交' + (dg.rejectedCash ? '，其中 ' + dg.rejectedCash + ' 次是資金不足以買進一張（含手續費約需 ' + Number(dg.minCashNeeded).toLocaleString() + ' 元）。本系統以整張交易，未模擬零股。' : '。'));
-  if (!dg.entrySignals && dg.bars <= dg.warmup) lines.push('資料長度（' + dg.bars + ' 根）不足暖機期，請擴大回測區間。');
+  if (dg.rejected) lines.push('有 ' + dg.rejected + ' 次進場訊號未成交' + (dg.rejectedCash ? '，其中 ' + dg.rejectedCash + ' 次是現金不足以買進一張（各次所需含手續費金額介於 ' + Number(dg.minCashNeeded).toLocaleString() + '～' + Number(dg.maxCashNeeded).toLocaleString() + ' 元，依當次成交參考價而定）。本系統以整張交易，未模擬零股。' : '。'));
+  if (!dg.entrySignals && dg.bars + dg.preBars <= dg.warmup) lines.push('資料長度（' + dg.bars + ' 根）不足暖機期，請擴大回測區間。');
   else if (!dg.entrySignals) lines.push('可交易期間內沒有出現符合條件的進場訊號（共振門檻 ' + (cfg.scoreThreshold || 1) + ' 分）。');
   if (dg.openAtEnd) lines.push('回測結束時仍有未平倉部位，未計入已完成交易的統計。');
   if (dg.pendingAtEnd) lines.push('最後一天的訊號需在下一個交易日開盤執行，資料已結束，未成交。');
+  lines.push('停損與停利只在單一價格點檢查（開盤模式看開盤價、收盤模式看收盤價），觸發時以同一價格成交；未使用盤中最高、最低價，盤中觸及但未在該價格點觸及的情況不會出場。');
   if (cfg.execType === 'close') lines.push('「當日收盤成交」假設訊號出現當天就能用收盤價成交；但收盤確認的訊號要收盤後才知道，實務上做不到，結果會偏樂觀。較保守的設定是「隔日開盤」。');
   return '<div class="signal-box" style="margin-top:8px"><div class="signal-title">回測診斷</div><div style="font-size:11px;line-height:1.8;color:var(--text2)">' + lines.join('<br>') + '</div></div>';
 }
@@ -586,6 +590,11 @@ function showResults(result, data) {
   var m = result.metrics;
   window._lastResult = result;
   window._lastData   = data;
+  var view = data;
+  if (result.offset && data.dates && result.equity && data.dates.length !== result.equity.length) {
+    view = { code: data.code }; ['dates', 'opens', 'highs', 'lows', 'closes', 'volumes'].forEach(function(k) { view[k] = (data[k] || []).slice(result.offset); });
+  }
+  window._lastView = view;
 
   // 今日訊號（直接用 core 的 SignalEngine）
   var lastI = data.closes.length - 1;
@@ -614,7 +623,7 @@ function showResults(result, data) {
     +'<div class="stat-grid">'
     +sc('總報酬率', fmtP(m.totalReturn), m.totalReturn>=0?'pos':'neg')
     +sc('年化報酬率',fmtP(m.cagr),       m.cagr>=0?'pos':'neg')
-    +sc('夏普比率',  fmtN(m.sharpe),     m.sharpe>=1?'pos':m.sharpe>=0?'neu':'neg')
+    +sc('夏普比率',  NT ? NA : fmtN(m.sharpe), NT ? 'neu' : m.sharpe>=1?'pos':m.sharpe>=0?'neu':'neg')
     +sc('最大回撤',  fmtP(-m.maxDD),     'neg')
     +sc('交易次數',  m.tradeCount+'次',  'neu')
     +sc('勝率',      NT ? NA : (m.winRate*100).toFixed(1)+'%', NT ? 'neu' : m.winRate>=0.5?'pos':'neg')
@@ -625,16 +634,16 @@ function showResults(result, data) {
     +'<div class="chart-wrap"><div class="chart-title">淨值曲線（▲進場 ▽出場）</div>'
     +'<canvas id="equityChart" style="display:block"></canvas></div>'
     +'</div>';
-  requestAnimationFrame(function(){ drawChart(data.dates, result.equity, m.initCapital, result.trades); });
+  requestAnimationFrame(function(){ drawChart(view.dates, result.equity, m.initCapital, result.trades); });
 
   // Tab 1: Metrics
   document.getElementById('perfContent').innerHTML =
     '<div class="fade-up"><div class="stat-grid" style="grid-template-columns:repeat(3,1fr)">'
     +sc('總獲利', fmtM(m.finalEquity-m.initCapital)+'元', m.finalEquity>=m.initCapital?'pos':'neg')
     +sc('年化報酬率', fmtP(m.cagr),       m.cagr>=0?'pos':'neg')
-    +sc('夏普比率',   fmtN(m.sharpe),     m.sharpe>=1?'pos':'neu')
-    +sc('索提諾比率', fmtN(m.sortino),    m.sortino>=1?'pos':'neu')
-    +sc('卡瑪比率',   fmtN(m.calmar),     m.calmar>=0.5?'pos':'neu')
+    +sc('夏普比率',   NT ? NA : fmtN(m.sharpe),  NT ? 'neu' : m.sharpe>=1?'pos':'neu')
+    +sc('索提諾比率', NT ? NA : fmtN(m.sortino), NT ? 'neu' : m.sortino>=1?'pos':'neu')
+    +sc('卡瑪比率',   NT ? NA : fmtN(m.calmar),  NT ? 'neu' : m.calmar>=0.5?'pos':'neu')
     +sc('最大回撤',   fmtP(-m.maxDD),     'neg')
     +sc('獲利因子',   NT ? NA : pfTxt(m), NT ? 'neu' : m.profitFactor>=1.5?'pos':'neu')
     +sc('期望值(元)', NT ? NA : fmtM(m.expectancy), NT ? 'neu' : m.expectancy>0?'pos':'neg')
@@ -684,7 +693,7 @@ function showResults(result, data) {
     +'</tbody></table></div>';
 
   // 備份
-  BacktestStorage.saveLastResult(result, data, window._lastConfig);
+  BacktestStorage.saveLastResult(result, view, window._lastConfig);
 }
 
 // ── 回測執行 ─────────────────────────────────────────────────
@@ -731,7 +740,13 @@ async function runBacktest() {
 
   try {
     setProgress(15,'抓取 '+code+' 歷史資料...');
-    var data = await fetchData(code, start, end);
+    // 多抓起始日前約 400 個日曆日（約 270 個交易日）供指標暖機；交易與績效只從起始日開始
+    var pre = new Date(start + 'T00:00:00'); pre.setDate(pre.getDate() - 400);
+    var preStart = pre.getFullYear() + '-' + String(pre.getMonth() + 1).padStart(2, '0') + '-' + String(pre.getDate()).padStart(2, '0');
+    var data = await fetchData(code, preStart, end);
+    config.tradeStart = start;
+    config.unexplained = Array.isArray(data.unexplained) ? data.unexplained.map(function(x) { return x.date; }) : null;
+    config.corpChecked = Array.isArray(data.unexplained); // 備援來源（直接打 FinMind）沒有公司行動檢查
     setProgress(40,'共 '+data.closes.length+' 筆，啟動 Web Worker...');
 
     // 傳送 typed array 需先轉為普通陣列（postMessage structured clone）
@@ -750,7 +765,7 @@ async function runBacktest() {
       function(pct){ setProgress(40 + pct*0.5, '計算中 '+pct+'%...'); },
       function(result, err) {
         if (err) { setProgress(0,'錯誤：'+err); return done(); }
-        setProgress(100,'回測完成 — '+data.closes.length+' 個交易日，'+result.metrics.tradeCount+' 筆交易');
+        setProgress(100,'回測完成 — '+(result.equity?result.equity.length:data.closes.length)+' 個交易日，'+result.metrics.tradeCount+' 筆交易');
         // 還原 typed array
         result.equity = Array.isArray(result.equity) ? result.equity : Array.from(result.equity);
         showResults(result, data);
@@ -919,7 +934,7 @@ function doExportTrades() {
 }
 function doExportEquity() {
   if (!window._lastResult) return alert('請先執行回測');
-  dlFile(BacktestStorage.exportEquityCSV(window._lastResult,window._lastData?window._lastData.dates:null),
+  dlFile(BacktestStorage.exportEquityCSV(window._lastResult,(window._lastResult&&window._lastResult.dates)||(window._lastData?window._lastData.dates:null)),
     (window._lastConfig.code||'bt')+'_equity_'+today+'.csv','text/csv;charset=utf-8');
 }
 

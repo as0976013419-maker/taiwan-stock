@@ -620,7 +620,9 @@ function closePosition(pos, exitPrice, exitDate, sellFeeRate) {
     grossPnl:   grossPnl,
     netPnl:     netPnl,
     pnlPct:     (netPnl / pos.margin) * 100,
-    returnMargin: pos.margin + netPnl,  // 退還給 portfolio 的金額
+    // 退還給 portfolio 的金額。進場手續費在進場時已從現金扣除；netPnl 也扣了它，所以這裡要加回，
+    // 否則每筆交易的帳戶權益會少算一次進場手續費（舊版錯誤：權益變動 ≠ 已實現淨損益合計）
+    returnMargin: pos.margin + netPnl + pos.entryFees,
   };
 }
 
@@ -722,7 +724,8 @@ function portfolioExitPosition(pf, exitPrice, date, sellFeeRate, reason) {
 function portfolioUpdateMark(pf, currentPrice) {
   if (!pf.position) { pf.unrealizedPnl = 0; return; }
   updatePositionMark(pf.position, currentPrice);
-  pf.unrealizedPnl = pf.position.unrealizedPnl;
+  // 持倉的 unrealizedPnl 已扣進場手續費，而該費用進場時已從現金扣除；計算權益時只加價格損益，避免重複扣除
+  pf.unrealizedPnl = pf.position.unrealizedPnl + pf.position.entryFees;
 }
 
 
@@ -772,13 +775,25 @@ var ExecutionEngine = (function() {
     var shortEnabled  = !!config.shortEnabled;
 
     var longStrat  = { entry: config.longEntry  || [], exit: config.longExit  || [] };
-    var warmup = Math.max(lookbackOf(config.longEntry), lookbackOf(config.longExit),
+    var lookback = Math.max(lookbackOf(config.longEntry), lookbackOf(config.longExit),
       shortEnabled ? lookbackOf(config.shortEntry) : 0, shortEnabled ? lookbackOf(config.shortExit) : 0, 1) + 1;
+    // config.tradeStart：使用者選的起始日。資料可以包含起始日前的 K 線（只用來暖機），交易只從起始日開始。
+    var tradeStartIdx = 0;
+    if (config.tradeStart) { tradeStartIdx = dates.findIndex(function(d) { return d >= config.tradeStart; }); if (tradeStartIdx < 0) tradeStartIdx = n; }
+    var warmup = Math.max(lookback, tradeStartIdx);
+    // 期間內（含暖機所需的回看範圍）有超過漲跌幅限制、查無公告的價格跳動：無法可靠回測，直接停止
+    if (config.unexplained && config.unexplained.length) {
+      var from = dates[Math.max(0, tradeStartIdx - lookback)], hit = config.unexplained.filter(function(d) { return d >= from && d <= dates[n - 1]; });
+      if (hit.length) throw new Error('回測期間（含指標暖機的回看範圍）內，' + hit.join('、') + ' 有超過漲跌幅限制且查無分割、面額變更或減資公告的價格跳動，無法可靠回測。請把起始日設在 ' + hit[hit.length - 1] + ' 之後至少 ' + lookback + ' 個交易日。');
+    }
     // 診斷：訊號出現幾次、幾次因資金不足一張（或其他原因）沒有成交
-    var diag = { warmup: warmup, tradeFrom: dates[Math.min(warmup, n - 1)] || null, bars: n, entrySignals: 0, exitSignals: 0, rejected: 0, rejectedCash: 0, minCashNeeded: null, pendingAtEnd: false };
+    var diag = { warmup: warmup, lookback: lookback, tradeStartIdx: tradeStartIdx, preBars: tradeStartIdx, startDelayed: lookback > tradeStartIdx && !!config.tradeStart, tradeFrom: dates[Math.min(warmup, n - 1)] || null, periodStart: dates[Math.min(tradeStartIdx, n - 1)] || null, bars: n - tradeStartIdx, corpChecked: config.corpChecked !== false, entrySignals: 0, exitSignals: 0, rejected: 0, rejectedCash: 0, minCashNeeded: null, maxCashNeeded: null, pendingAtEnd: false, entryLog: [] };
     // 買進張數要把手續費算進去，否則 100% 部位時常因「股款＋手續費 > 現金」被靜默拒絕
     function lotsFor(base, price, feeRate) { return Math.floor(base * posSizePct / (price * 1000 * (1 + feeRate))); }
-    function noteReject(price, feeRate) { diag.rejected++; var need = price * 1000 * (1 + feeRate); if (portfolioEquity(pf) < need) { diag.rejectedCash++; diag.minCashNeeded = Math.max(diag.minCashNeeded || 0, Math.round(need)); } }
+    function noteReject(price, feeRate) { diag.rejected++; var need = price * 1000 * (1 + feeRate); if (pf.balance < need) { diag.rejectedCash++; diag.minCashNeeded = diag.minCashNeeded === null ? Math.round(need) : Math.min(diag.minCashNeeded, Math.round(need)); diag.maxCashNeeded = Math.max(diag.maxCashNeeded || 0, Math.round(need)); } }
+    function logEntry(sigDate, execDate, side, price, lots, cashBefore, feeRate) {
+      diag.entryLog.push({ signalDate: sigDate, execDate: execDate, side: side, price: price, cashBefore: Math.round(cashBefore), perLot: Math.round(price * 1000 * (1 + feeRate)), lots: lots, filled: !!pf.position });
+    }
     var shortStrat = { entry: config.shortEntry || [], exit: config.shortExit || [] };
 
     // Step 1: 預計算所有指標（傳入策略設定讓 precompute 動態計算）
@@ -830,8 +845,9 @@ var ExecutionEngine = (function() {
       if (execType === 'open' && i > 0) {
         if (pendingLongEntry && !pf.position) {
           var base = posBase === 'equity' ? portfolioEquity(pf) : capital;
-          var lots = lotsFor(base, execPrice, buyFeeRate);
+          var lots = lotsFor(base, execPrice, buyFeeRate), cash0 = pf.balance;
           portfolioEnterLong(pf, lots, execPrice, date, buyFeeRate);
+          logEntry(dates[i - 1], date, 'long', execPrice, lots, cash0, buyFeeRate);
           if (!pf.position) noteReject(execPrice, buyFeeRate);
           if (pf.position) {
             trades.push({ type: 'entry', side: 'long', date: date, price: execPrice, qty: lots, reason: 'strategy' });
@@ -843,8 +859,9 @@ var ExecutionEngine = (function() {
         }
         if (pendingShortEntry && !pf.position) {
           var base = posBase === 'equity' ? portfolioEquity(pf) : capital;
-          var lots = lotsFor(base, execPrice, buyFeeRate);
+          var lots = lotsFor(base, execPrice, buyFeeRate), cash0 = pf.balance;
           portfolioEnterShort(pf, lots, execPrice, date, buyFeeRate);
+          logEntry(dates[i - 1], date, 'short', execPrice, lots, cash0, buyFeeRate);
           if (!pf.position) noteReject(execPrice, buyFeeRate);
           if (pf.position) {
             trades.push({ type: 'entry', side: 'short', date: date, price: execPrice, qty: lots, reason: 'strategy' });
@@ -872,8 +889,8 @@ var ExecutionEngine = (function() {
             var t = portfolioExitPosition(pf, checkPrice, date, sellFeeRate, 'stopLoss');
             if (t) trades.push(Object.assign({}, t, { type: 'exit', side: 'long', date: date, price: checkPrice, qty: t.qty }));
           } else if (stopProfitPct && unrealPct >= stopProfitPct) {
-            var t = portfolioExitPosition(pf, closePrice, date, sellFeeRate, 'stopProfit');
-            if (t) trades.push(Object.assign({}, t, { type: 'exit', side: 'long', date: date, price: closePrice, qty: t.qty }));
+            var t = portfolioExitPosition(pf, checkPrice, date, sellFeeRate, 'stopProfit'); // 舊版以開盤價觸發、卻以收盤價成交
+            if (t) trades.push(Object.assign({}, t, { type: 'exit', side: 'long', date: date, price: checkPrice, qty: t.qty }));
           } else if (longStrat.exit.indexOf('trailing_stop') >= 0 && pf.position) {
             if (closePrice < pf.position.trailHigh * 0.95) {
               var t = portfolioExitPosition(pf, closePrice, date, sellFeeRate, 'trailingStop');
@@ -886,8 +903,8 @@ var ExecutionEngine = (function() {
             var t = portfolioExitPosition(pf, checkPrice, date, sellFeeRate, 'stopLoss');
             if (t) trades.push(Object.assign({}, t, { type: 'exit', side: 'short', date: date, price: checkPrice, qty: t.qty }));
           } else if (stopProfitPct && unrealPct >= stopProfitPct) {
-            var t = portfolioExitPosition(pf, closePrice, date, sellFeeRate, 'stopProfit');
-            if (t) trades.push(Object.assign({}, t, { type: 'exit', side: 'short', date: date, price: closePrice, qty: t.qty }));
+            var t = portfolioExitPosition(pf, checkPrice, date, sellFeeRate, 'stopProfit');
+            if (t) trades.push(Object.assign({}, t, { type: 'exit', side: 'short', date: date, price: checkPrice, qty: t.qty }));
           } else if (shortStrat.exit.indexOf('s_trailing') >= 0 && pf.position) {
             if (closePrice > pf.position.trailLow * 1.05) {
               var t = portfolioExitPosition(pf, closePrice, date, sellFeeRate, 'trailingStop');
@@ -913,14 +930,16 @@ var ExecutionEngine = (function() {
           if (!pf.position) {
             if (leScore >= threshold) {
               var base = posBase === 'equity' ? portfolioEquity(pf) : capital;
-              var lots = lotsFor(base, execPrice, buyFeeRate);
+              var lots = lotsFor(base, execPrice, buyFeeRate), cash0 = pf.balance;
               portfolioEnterLong(pf, lots, execPrice, date, buyFeeRate);
+              logEntry(date, date, 'long', execPrice, lots, cash0, buyFeeRate);
               if (!pf.position) noteReject(execPrice, buyFeeRate);
               if (pf.position) trades.push({ type: 'entry', side: 'long', date: date, price: execPrice, qty: lots, reason: 'strategy', score: leScore });
             } else if (shortEnabled && seScore >= threshold) {
               var base = posBase === 'equity' ? portfolioEquity(pf) : capital;
-              var lots = lotsFor(base, execPrice, buyFeeRate);
+              var lots = lotsFor(base, execPrice, buyFeeRate), cash0 = pf.balance;
               portfolioEnterShort(pf, lots, execPrice, date, buyFeeRate);
+              logEntry(date, date, 'short', execPrice, lots, cash0, buyFeeRate);
               if (!pf.position) noteReject(execPrice, buyFeeRate);
               if (pf.position) trades.push({ type: 'entry', side: 'short', date: date, price: execPrice, qty: lots, reason: 'strategy', score: seScore });
             }
@@ -1187,11 +1206,14 @@ function runBacktestEngine(data, config) {
 
   dbg('runBacktestEngine', n, 'bars, config:', config);
   var result = ExecutionEngine.run(data, config);
-  var metrics = MetricsEngine.compute(
-    result.equity, result.trades, config.capital || 1000000, data.dates
-  );
+  // 績效只計算使用者選的期間：去掉起始日前、只用來暖機的 K 線
+  var off = (result.diag && result.diag.tradeStartIdx) || 0;
+  var eq = Array.from(result.equity).slice(off), dts = (data.dates || []).slice(off);
+  var metrics = MetricsEngine.compute(eq, result.trades, config.capital || 1000000, dts);
   return {
-    equity:   Array.from(result.equity),
+    equity:   eq,
+    dates:    dts,
+    offset:   off,
     trades:   result.trades,
     metrics:  metrics,
     diag:     result.diag,

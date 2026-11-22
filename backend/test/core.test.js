@@ -321,7 +321,7 @@ test("歷史訊號統計：用語、成熟樣本與目前狀態", async () => {
 });
 test("評分覆蓋：ETF 的不適用項目不計分、不縮小分母，分數本身不變", async () => {
   const U = require("../src/util"); U._test_clear(); const e = await analyzeFn(demo, "0050"), s = await analyzeFn(demo, "2330");
-  assert.strictEqual(e.scored.applicable, 60); assert.ok(e.scored.naKeys.includes("rev_yoy")); assert.ok(e.scored.known <= 60);
+  assert.strictEqual(e.scored.applicable, 70); assert.ok(e.scored.naKeys.includes("rev_yoy")); assert.ok(!e.scored.naKeys.includes("margin_health"), "ETF 可融資，融資不是不適用"); assert.ok(e.scored.known <= 70);
   assert.strictEqual(s.scored.applicable, 100); assert.strictEqual(s.scored.naKeys.length, 0);
   const d = e.scored.detail; assert.strictEqual(e.scored.score, d._fund + d._tech + d._vol + d._chip + d._margin + d._theme);
 });
@@ -353,4 +353,86 @@ test("回測：買進張數把手續費算進去，不會因股款＋手續費�
   const r = B.run(JSON.parse(JSON.stringify(d)), { code: "T", capital: 100000, execType: "close", positionBase: "equity", posSize: 100, scoreThreshold: 1, longEntry: [{ id: "price_above_ma", params: { period: 20 } }], longExit: [], shortEnabled: false, shortEntry: [], shortExit: [] });
   // 股價 100 元、本金 10 萬：不含手續費會算成 1 張（10 萬元＋142.5 元手續費 > 10 萬 → 被拒）；含手續費則正確算成 0 張並列入資金不足
   assert.strictEqual(r.trades.filter((t) => t.type === "entry").length, 0); assert.ok(r.diag.rejectedCash > 0);
+});
+
+// ── 監督審查（第一輪）回歸測試 ──
+const btCfg = (o) => Object.assign({ code: "T", capital: 1000000, execType: "open", positionBase: "equity", posSize: 100, scoreThreshold: 1, longEntry: [{ id: "ma_golden", params: { fast: 5, slow: 20 } }], longExit: [{ id: "ma_death", params: { fast: 5, slow: 20 } }], shortEnabled: false, shortEntry: [], shortExit: [] }, o);
+const ohlc = (closes, opens) => { const d = flat(closes.length, (i) => closes[i]); d.code = "T"; d.opens = opens ? opens.slice() : closes.slice(); d.highs = d.closes.map((c, i) => Math.max(c, d.opens[i])); d.lows = d.closes.map((c, i) => Math.min(c, d.opens[i])); return d; };
+test("回測會計：期末權益變動＝已實現淨損益合計（舊版每筆多扣一次進場手續費）", async () => {
+  const B = vmLoad(), h = await demo.getHistory("2603", "2000-01-01"), d = { code: "2603" }; for (const f of ["dates", "opens", "highs", "lows", "closes", "volumes"]) d[f] = h[f].slice(-500);
+  for (const execType of ["open", "close"]) {
+    const r = B.run(JSON.parse(JSON.stringify(d)), btCfg({ code: "2603", capital: 5000000, execType, stopLoss: 8, stopProfit: 25 }));
+    const closed = r.trades.filter((t) => t.type === "exit"), sum = closed.reduce((t, x) => t + x.netPnl, 0); assert.ok(closed.length > 0);
+    if (!r.diag.openAtEnd) assert.ok(Math.abs(r.metrics.finalEquity - 5000000 - sum) < 1e-6, `${execType}：權益變動 ${r.metrics.finalEquity - 5000000} ≠ 淨損益合計 ${sum}`);
+  }
+  // 持倉中：權益＝現金＋持股市值（以收盤價計），進場手續費只扣一次
+  const c = Array.from({ length: 60 }, (_, i) => (i < 30 ? 100 : 120)), x = ohlc(c);
+  const r = B.run(JSON.parse(JSON.stringify(x)), btCfg({ capital: 1000000, execType: "close", longEntry: [{ id: "price_above_ma", params: { period: 20 } }], longExit: [] }));
+  const e = r.trades.find((t) => t.type === "entry"), fee = e.price * 1000 * e.qty * 0.001425;
+  assert.ok(Math.abs(r.equity[r.equity.length - 1] - (1000000 - fee + (120 - e.price) * 1000 * e.qty)) < 1e-6);
+});
+test("回測停利：開盤觸發就以開盤價成交（舊版開盤觸發、收盤成交）", () => {
+  const B = vmLoad(), c = Array.from({ length: 60 }, (_, i) => (i < 30 ? 100 : i < 40 ? 110 : i === 40 ? 112 : 111)), o = c.slice();
+  o[40] = 140; // 第 40 天開盤跳空到 140（相對 110 進場 +27%），收盤回落 112
+  const r = B.run(JSON.parse(JSON.stringify(ohlc(c, o))), btCfg({ capital: 1000000, execType: "open", stopProfit: 25, longEntry: [{ id: "price_above_ma", params: { period: 20 } }], longExit: [] }));
+  const ex = r.trades.find((t) => t.type === "exit"); assert.strictEqual(ex.reason, "stopProfit"); assert.strictEqual(ex.price, 140, "應以觸發的開盤價成交，而不是收盤價 112");
+  const r2 = B.run(JSON.parse(JSON.stringify(ohlc(c, o))), btCfg({ capital: 1000000, execType: "close", stopProfit: 25, longEntry: [{ id: "price_above_ma", params: { period: 20 } }], longExit: [] }));
+  assert.ok(!r2.trades.some((t) => t.reason === "stopProfit"), "收盤模式只看收盤價：112 未達 +25%，不得出場");
+});
+test("回測期間：用起始日前資料暖機，起始日當天即可交易；績效只算回測期間", () => {
+  const B = vmLoad(), c = Array.from({ length: 80 }, (_, i) => (i < 50 ? 100 : 110)), d = ohlc(c), start = d.dates[50];
+  const cfg = btCfg({ capital: 1000000, execType: "close", tradeStart: start, longEntry: [{ id: "price_above_ma", params: { period: 20 } }], longExit: [] });
+  const r = B.run(JSON.parse(JSON.stringify(d)), cfg);
+  assert.strictEqual(r.trades[0].date, start, "起始日出現訊號就應在起始日成交，不得被暖機跳過"); assert.strictEqual(r.offset, 50);
+  assert.strictEqual(r.equity.length, 30); assert.strictEqual(r.dates[0], start); assert.strictEqual(r.diag.startDelayed, false);
+  // 起始日前資料不足：明示延後交易
+  const r2 = B.run(JSON.parse(JSON.stringify(d)), Object.assign({}, cfg, { tradeStart: d.dates[5] })); assert.strictEqual(r2.diag.startDelayed, true); assert.strictEqual(r2.diag.tradeFrom, d.dates[21]);
+});
+test("回測：期間內有無法解釋的跳動就拒絕；跳動在回看範圍之前則照常執行", () => {
+  const B = vmLoad(), c = Array.from({ length: 120 }, (_, i) => 100 + (i % 7)), d = ohlc(c), cfg = btCfg({ capital: 1000000, execType: "close", tradeStart: d.dates[80], longEntry: [{ id: "price_above_ma", params: { period: 20 } }], longExit: [] });
+  assert.throws(() => B.run(JSON.parse(JSON.stringify(d)), Object.assign({}, cfg, { unexplained: [d.dates[90]] })), /無法可靠回測/);
+  assert.throws(() => B.run(JSON.parse(JSON.stringify(d)), Object.assign({}, cfg, { unexplained: [d.dates[70]] })), /無法可靠回測/, "暖機回看範圍內也要拒絕");
+  assert.doesNotThrow(() => B.run(JSON.parse(JSON.stringify(d)), Object.assign({}, cfg, { unexplained: [d.dates[30]] })));
+});
+test("個股分析：有無法解釋的跳動時，價格類計算只用跳動後的資料；長度不足的指標不計算", async () => {
+  const U = require("../src/util"); U._test_clear();
+  const jump = async (c, s, e) => { const h = await demo.getHistory(c, s, e), k = h.dates.length - 150, o = { code: c, dates: h.dates }; for (const f of ["opens", "highs", "lows", "closes"]) o[f] = h[f].map((x, i) => (i < k ? x * 3 : x)); o.volumes = h.volumes; return o; };
+  const a = await analyzeFn(srcWith({ getHistory: jump }), "2330");
+  assert.ok(a.adjust.cut && a.adjust.cut.kept === 150, JSON.stringify(a.adjust.cut)); assert.ok(a.adjust.unexplained.length === 1);
+  assert.strictEqual(a.indicators.bars, 150); assert.strictEqual(a.quant.rs.find((r) => r.k === 250).ret, null); assert.strictEqual(a.quant.trend, null); assert.strictEqual(a.quant.events, null);
+  assert.ok(a.quant.risk && a.quant.risk.days === 149, "風險指標只用跳動後的 150 根"); assert.ok(a.quant.risk.maxDD > -60, "不得出現跨越斷點的假回撤");
+  assert.ok(/捨棄之前/.test(a.text)); assert.ok(!/NaN|undefined|Infinity|null/.test(a.text));
+  // 跳動後資料不足 30 根：不產生任何技術指標與量化推論
+  U._test_clear(); const short = async (c, s, e) => { const h = await jump(c, s, e), k = h.dates.length - 20; for (const f of ["opens", "highs", "lows", "closes"]) h[f] = h[f].map((x, i) => (i < k ? x * 3 : x / 3 * 3)); for (const f of ["opens", "highs", "lows", "closes"]) h[f] = h[f].map((x, i) => (i >= k ? x : x)); const o = Object.assign({}, h); for (const f of ["opens", "highs", "lows", "closes"]) o[f] = h[f].map((x, i) => (i < k ? x * 2 : x)); return o; };
+  const b = await analyzeFn(srcWith({ getHistory: short }), "2330"); assert.strictEqual(b.indicators, null); assert.strictEqual(b.quant, null); assert.ok(!/NaN|undefined|Infinity|null/.test(b.text));
+});
+test("漲跌幅限制依商品類型：槓桿 ETF 的 15% 變動不是異常，一般股票的 15% 變動是", () => {
+  const h = flat(40, (i) => (i < 20 ? 100 : 115));
+  assert.strictEqual(Q.adjustPrices(h, [], [], { limit: Q.limitFor("00631L") }).unexplained.length, 0);
+  assert.strictEqual(Q.adjustPrices(h, [], [], { limit: Q.limitFor("2330") }).unexplained.length, 1);
+  assert.strictEqual(Q.limitFor("00632R"), 0.105); assert.strictEqual(Q.limitFor("0050"), 0.105);
+});
+test("股利：從未配息（查無紀錄）不是資料缺漏；取得失敗才是", async () => {
+  const U = require("../src/util"); U._test_clear();
+  const a = await analyzeFn(srcWith({ getDividends: async () => null }), "2330"); assert.strictEqual(a.adjust.dividendsAvailable, true); assert.ok(a.quant.rs.find((r) => r.k === 20).tr !== null);
+  U._test_clear(); const b = await analyzeFn(srcWith({ getDividends: async () => { throw new Error("down"); } }), "2330");
+  assert.strictEqual(b.adjust.dividendsAvailable, false); assert.ok(b.quant.rs.every((r) => r.tr === null), "股利取得失敗時不得顯示含息報酬"); assert.ok(/報酬偏低、波動與回撤偏高/.test(b.text));
+});
+test("ETF：不以股票的 100 分門檻分級，文字不把不適用寫成 0 分", async () => {
+  const U = require("../src/util"); U._test_clear(); const e = await analyzeFn(demo, "0050"), s = await analyzeFn(demo, "2330");
+  assert.strictEqual(e.scored.grade, "不分級（ETF）"); assert.ok(!/基本面 0\/20|題材 0\/10/.test(e.text)); assert.ok(/基本面 不適用/.test(e.text) && /題材 不適用/.test(e.text) && /ETF 不分級/.test(e.text));
+  assert.ok(/融資 資料不足/.test(e.text), "示範資料的 ETF 沒有融資資料：應寫資料不足，而不是 0/10");
+  assert.ok(["強勢觀察", "可試單", "等待整理", "不建議"].includes(s.scored.grade), "個股維持原分級");
+});
+test("/history：回傳公司行動檢查結果；股利取得失敗時標示未檢查，不冒然判定", async () => {
+  const { server } = require("../server"); await new Promise((r) => server.listen(0, r)); const port = server.address().port;
+  try { const j = await (await fetch(`http://localhost:${port}/history?code=2330&start=2024-01-01&end=2030-01-01`)).json(); assert.ok(Array.isArray(j.unexplained)); assert.strictEqual(j.checkNote, null); }
+  finally { await new Promise((r) => server.close(r)); }
+});
+
+test("不變式：標為不適用的項目得分必須為 0（以真實結構的 ETF 融資資料驗證）", async () => {
+  const S2 = require("../src/scoring"), snap = { isETF: true, changePct: 1, margin: { bal: 1000, prev: 1200, limit: 100000 } }; // ETF 有融資資料
+  const sc = S2.scoreStock({ snap, ind: null, fund: {}, sector: null });
+  for (const k of sc.naKeys) assert.ok(sc.detail[k] === "—" || sc.detail[k] === "0", k + " 不適用卻得分：" + sc.detail[k]);
+  assert.ok(sc.detail._margin > 0, "ETF 的融資資料應計分"); assert.ok(!sc.naKeys.includes("margin_health"));
 });

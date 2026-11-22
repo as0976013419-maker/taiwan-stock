@@ -23,7 +23,8 @@ const dailyRets = (c) => { const r = []; for (let i = 1; i < c.length; i++) r.pu
  * @param divEvents [{date, cash, stock}]  現金股利（元／股）、股票股利（元／股，面額 10 元）
  * @param actions   [{date, before, after}] 官方參考價：股數變動前收盤價 → 變動後參考價
  */
-function adjustPrices(hist, divEvents, actions) {
+function adjustPrices(hist, divEvents, actions, opts) {
+  const limit = (opts && opts.limit) || 0.105; // 判定「超過漲跌幅限制」的門檻（含 0.5% 緩衝）
   const { dates: d, opens: o, highs: h, lows: l, closes: c, volumes: v } = hist, n = c.length;
   const ev = new Map(), seen = new Set();
   for (const e of divEvents || []) { // 同一筆股利重複出現時只計一次
@@ -37,13 +38,23 @@ function adjustPrices(hist, divEvents, actions) {
     if (e && prev > 0) { if (e.cash > 0 && e.cash < prev) { cd *= (prev - e.cash) / prev; ref = prev - e.cash; nDiv++; } if (e.stock > 0) { share = 1 / (1 + e.stock / 10); ref *= share; shareEvents++; } }
     if (ac) { const k = ac.after / ac.before; share *= k; ref *= k; splits.push({ date: d[i], ratio: round(ac.before / ac.after, 4), type: ac.type || "股數變動", before: ac.before, after: ac.after, official: true }); }
     const resid = ref > 0 ? c[i] / ref - 1 : 0;
-    if (i >= 10 && Math.abs(resid) > 0.105) unexplained.push({ date: d[i], movePct: round(resid * 100, 1) }); // 超過 ±10% 漲跌幅限制又查無公告
+    if (i >= 10 && Math.abs(resid) > limit) unexplained.push({ date: d[i], movePct: round(resid * 100, 1) }); // 超過 ±10% 漲跌幅限制又查無公告
     cs *= share;
   }
   fS[0] = cs; fD[0] = cd;
   const mk = (withDiv) => { const f = (i) => fS[i] * (withDiv ? fD[i] : 1); return { code: hist.code, dates: d, opens: o.map((x, i) => x * f(i)), highs: h.map((x, i) => x * f(i)), lows: l.map((x, i) => x * f(i)), closes: c.map((x, i) => x * f(i)), volumes: v.map((x, i) => x / fS[i]) }; };
   const changed = splits.length > 0 || shareEvents > 0; // 官方股數變動或配股：價位序列才需要換算
   return { price: changed ? mk(false) : hist, total: changed || nDiv > 0 ? mk(true) : hist, splits, unexplained, dividendsApplied: nDiv, changed: changed || nDiv > 0 };
+}
+
+/** 漲跌幅限制：一般股票與 ETF 為 10%；代號以 L 結尾的槓桿型 ETF（國內皆為 2 倍）為 20%。只依商品類型規則判斷，不針對個別代號。 */
+const limitFor = (code) => (/^00\d{2,4}L$/.test(String(code || "")) ? 0.205 : 0.105);
+/** 從「最後一次無法解釋的跳動」那天起截斷，讓所有價格類計算只使用彼此可比較的資料 */
+function cutAfterJumps(series, unexplained) {
+  if (!series || !unexplained || !unexplained.length) return { series, cutFrom: null };
+  const last = unexplained.map((x) => x.date).sort().pop(), k = series.dates.indexOf(last); if (k <= 0) return { series, cutFrom: null };
+  const o = { code: series.code }; for (const f of ["dates", "opens", "highs", "lows", "closes", "volumes"]) o[f] = series[f].slice(k);
+  return { series: o, cutFrom: last, dropped: k };
 }
 
 /** Wilder ATR，回傳最新值 */
@@ -188,4 +199,4 @@ function sizing(price, atr14, stops, capital = 1000000, riskPct = 1, roundFn = n
     return { name, stop: round(stop), distPct: round(dist / price * 100), shares, lots: round(shares / 1000, 2), value: Math.round(value), weight: round(value / capital * 100, 1) };
   });
 }
-module.exports = { mean, std, median, quantile, pctRank, adjustPrices, atr, riskMetrics, relStrength, trendTemplate, turtle, eventStudy, factors, sizing };
+module.exports = { mean, std, median, quantile, pctRank, adjustPrices, limitFor, cutAfterJumps, atr, riskMetrics, relStrength, trendTemplate, turtle, eventStudy, factors, sizing };

@@ -14,7 +14,13 @@ function roundTick(p, etf, dir = -1) { if (!(p > 0)) return null; const t = tick
 // 各細項滿分（加總 100）。用來顯示「適用滿分」與「資料覆蓋」，不參與計分。
 const ITEM_MAX = { rev_yoy: 8, eps_growth: 5, roe: 4, margin_stable: 3, above_ma20: 5, ma20_up: 5, ma60_up: 5, ma_bull: 5, breakout: 5, up_vol: 5, down_vol: 5, vol_above_avg: 5,
   foreign_buy: 6, site_buy: 6, inst_total: 4, big_player: 4, margin_health: 5, margin_decrease: 5, theme_main: 6, theme_support: 4 };
-const ETF_NA = ["rev_yoy", "eps_growth", "roe", "margin_stable", "margin_health", "margin_decrease", "theme_main", "theme_support"];
+// ETF 不適用：基本面（沒有營收、財報）與題材（不屬於單一產業族群）。融資不在此列：多數 ETF 可融資融券，有資料就計分，沒有資料算「資料不足」
+const GROUPS = { fund: ["rev_yoy", "eps_growth", "roe", "margin_stable"], tech: ["above_ma20", "ma20_up", "ma60_up", "ma_bull", "breakout"], vol: ["up_vol", "down_vol", "vol_above_avg"],
+  chip: ["foreign_buy", "site_buy", "inst_total", "big_player"], margin: ["margin_health", "margin_decrease"], theme: ["theme_main", "theme_support"] };
+/** 面向狀態：all-na＝全部不適用、all-missing＝全部缺資料、partial＝部分缺資料、ok */
+function groupState(sc, g) { const ks = GROUPS[g], na = ks.filter((k) => (sc.naKeys || []).includes(k)).length, miss = ks.filter((k) => (sc.missingKeys || []).includes(k)).length;
+  return na === ks.length ? "na" : miss + na === ks.length ? "missing" : miss ? "partial" : "ok"; }
+const ETF_NA = ["rev_yoy", "eps_growth", "roe", "margin_stable", "theme_main", "theme_support"];
 
 function gradeOf(score) {
   if (score >= 80) return { grade: "強勢觀察", gradeColor: "#ef4444" };
@@ -109,7 +115,9 @@ function scoreStock(x) {
   const naKeys = etf ? ETF_NA : [], missingKeys = Object.keys(ITEM_MAX).filter((k) => !naKeys.includes(k) && d[k] === "—");
   const applicable = Object.keys(ITEM_MAX).filter((k) => !naKeys.includes(k)).reduce((t, k) => t + ITEM_MAX[k], 0);
   const known = applicable - missingKeys.reduce((t, k) => t + ITEM_MAX[k], 0);
-  return Object.assign({ score, detail: d, roe: round(roe, 1), etf, applicable, known, naKeys, missingKeys }, gradeOf(score));
+  // 等級門檻（80／65／50）是以 100 分為滿分設計的；ETF 適用滿分只有 60，套用同一門檻等於把不適用項目當零分，所以 ETF 不分級
+  const grade = etf ? { grade: "不分級（ETF）", gradeColor: "#6b7280" } : gradeOf(score);
+  return Object.assign({ score, detail: d, roe: round(roe, 1), etf, applicable, known, naKeys, missingKeys }, grade);
 }
 
 /** 掃描表格用的一句話（描述現況與觀察條件，不是買賣指令） */
@@ -148,4 +156,4 @@ function momentumOf(snap, ind, ctx = {}) {
   return { momentumScore: score, momentumTags: tags };
 }
 
-module.exports = { VERSION, scoreStock, suggestionOf, momentumOf, gradeOf, limitUpPrice, roundTick, ITEM_MAX };
+module.exports = { VERSION, scoreStock, suggestionOf, momentumOf, gradeOf, limitUpPrice, roundTick, ITEM_MAX, GROUPS, groupState };

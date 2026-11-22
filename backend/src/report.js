@@ -3,7 +3,7 @@
 // 所有數字都直接來自後端計算結果；沒有資料的項目顯示「—」，不估計、不補值。
 // 多空方向（stance）與標籤（tags）以結構化欄位回傳，前端不再從文字裡猜。
 const { pctStr } = require("./util");
-const { limitUpPrice, roundTick } = require("./scoring");
+const { limitUpPrice, roundTick, groupState } = require("./scoring");
 const Q = require("./quant");
 
 const ok = (v) => v !== null && v !== undefined && isFinite(v);
@@ -105,6 +105,11 @@ function buildReport(a) {
 
   // ════════════ 行情 ════════════
   const lu = q.prevClose ? limitUpPrice(q.prevClose, etf) : null;
+  // 各面向得分：不適用的面向寫「不適用」，不寫成 0 分
+  // 不適用寫「不適用」、全部缺資料寫「資料不足」，都不寫成 0 分；部分缺資料時標示
+  const part = (g, v, max) => { const st = groupState(sc, g); return st === "na" ? "不適用" : st === "missing" ? "資料不足" : `${v}/${max}${st === "partial" ? "（部分資料不足）" : ""}`; };
+  const partsTxt = `基本面 ${part("fund", sc.detail._fund, 20)}、技術面 ${part("tech", sc.detail._tech, 25)}、量價 ${part("vol", sc.detail._vol, 15)}、籌碼 ${part("chip", sc.detail._chip, 20)}、融資 ${part("margin", sc.detail._margin, 10)}、題材 ${part("theme", sc.detail._theme, 10)}`;
+  const scoreTxt = sc.etf ? `${sc.score} 分（適用滿分 ${sc.applicable}；ETF 不分級）` : `${sc.score} / 100（${sc.grade}）`;
   sec("行情總覽", [
     `名稱：${q.name}（${q.code}，${q.market || ""}${sector ? "・" + sector.sector : etf ? "・ETF" : ""}）`,
     `收盤：${f(P)}　漲跌：${ok(q.change) ? (q.change > 0 ? "+" : "") + f(q.change) : "—"}（${pctStr(q.changePct)}）`,
@@ -116,14 +121,15 @@ function buildReport(a) {
     q.value ? `| 成交金額 | ${yi(q.value)}（${q.valueSource || ""}，${q.date || ""}） |` : `| 成交金額 | —（${q.date || "當日"} 的官方成交金額尚未取得；不以其他日期的數字代替） |`,
     fu.marketCap ? `| 市值 | ${yi(fu.marketCap)} |` : "",
     has ? `| 52 週區間 | ${f(i.lo250)} ~ ${f(i.hi250)}（近 ${i.span250} 個交易日；現價位於區間 ${f(i.pos250, 0)}%） |` : "",
-    `| 綜合評分 | ${sc.score} / 100（${sc.grade}） |`,
+    `| 綜合評分 | ${scoreTxt} |`,
     mkt ? `【大盤】加權指數 ${f(mkt.close, 0)}（${mkt.date}），位於 50 日均線${mkt.above50 ? "之上" : "之下"}、200 日均線${mkt.above200 ? "之上" : "之下"}；近 20 日 ${pc(mkt.ret20)}、近 60 日 ${pc(mkt.ret60)}。` : "",
     `資料時間：${q.time || q.date || "最近交易日"}${q.realtime ? "（盤中即時；成交量為當日累計，量能相關判斷改用前一完整交易日 " + (has && i.volAsOf ? i.volAsOf : "") + "）" : "（收盤）"}`,
     a.asOf ? `【各項資料日期與來源】報價 ${a.asOf.quote || "—"}（${q.source || "—"}）｜K 線 ${a.asOf.kline || "—"}（FinMind）｜法人 ${a.asOf.chip || "—"}｜融資券 ${a.asOf.margin || "—"}｜外資持股 ${a.asOf.holding || "—"}（以上 FinMind）｜月營收 ${a.asOf.revenue || "—"}｜季財報 ${a.asOf.financials || "—"}（FinMind，源自公開資訊觀測站）｜大盤 ${a.asOf.index || "—"}（加權指數）｜族群與官方估值 ${a.asOf.snapshot || "—"}（證交所／櫃買中心 OpenAPI）` : "",
     q.staleSources && q.staleSources.length ? `【資料落後】${q.staleSources.map((x) => x.source + " 仍停在 " + x.date).join("、")}；本頁報價採用 ${q.date} 的資料，落後來源的欄位（如成交金額、族群統計、官方估值）已分別標示日期或換算，不與當日數字混用。` : "",
     a.adjust && a.adjust.splits.length ? `【價格還原】依官方公告還原股數變動：${a.adjust.splits.map((x) => x.date + " " + x.type + "（參考價 " + f(x.before) + " → " + f(x.after) + "，" + x.ratio + " 倍）").join("、")}。該日之前的歷史價格與成交量已換算成現在的股數基準；之後的價格就是實際成交價。` : "",
-    a.adjust && a.adjust.unexplained.length ? `【未還原的異常跳動】${a.adjust.unexplained.slice(0, 5).map((x) => x.date + "（" + pc(x.movePct, 1) + "）").join("、")}：單日變動超過 10% 漲跌幅限制，但查無分割、面額變更或減資公告，可能是無漲跌幅限制的商品、上市初期或恢復交易。系統未做任何還原，相關期間的報酬與波動統計請保守解讀。` : "",
-    a.adjust && !a.adjust.dividendsAvailable ? "【注意】股利資料暫時無法取得，本次的報酬、波動與歷史訊號統計未還原除息，除息日會被算成下跌。" : "",
+    a.adjust && a.adjust.unexplained.length ? `【無法解釋的價格跳動】${a.adjust.unexplained.slice(0, 5).map((x) => x.date + "（" + pc(x.movePct, 1) + "）").join("、")}${a.adjust.unexplained.length > 5 ? " 等 " + a.adjust.unexplained.length + " 次" : ""}：單日變動超過漲跌幅限制，但查無分割、面額變更、減資或股利紀錄，無法判斷是真實行情還是未收錄的公司行動，系統不做任何換算。${a.adjust.cut ? "為避免跨越這個斷點，所有價格類計算（技術指標、多週期報酬、波動、回撤、歷史訊號、趨勢模板、支撐壓力）只使用 " + a.adjust.cut.from + " 起的 " + a.adjust.cut.kept + " 根 K 線（捨棄之前 " + a.adjust.cut.dropped + " 根）；回看長度超過這段資料的指標一律不計算。" : ""}` : "",
+    a.adjust && !a.adjust.dividendsAvailable ? "【注意】股利資料暫時無法取得：「含息」報酬不顯示；報酬、波動、回撤與歷史訊號統計未還原除息，除息日被算成下跌，所以報酬偏低、波動與回撤偏高。" : "",
+    "【可偵測範圍】只能偵測單日變動超過漲跌幅限制的公司行動；幅度在限制以內、又未收錄於資料源的股數變動（例如小比例配股）無法偵測。上市未滿 10 個交易日的資料不做偵測。",
     a.adjust && !a.adjust.actionsAvailable ? "【注意】官方股數變動清單暫時無法取得，若這檔股票曾分割或變更面額，長期報酬與均線會失真。" : "",
   ]);
 
@@ -483,8 +489,8 @@ function buildReport(a) {
   ]);
 
   sec("綜合分析", [
-    `綜合評分 ${sc.score}/100（${sc.grade}）：基本面 ${sc.detail._fund}/20、技術面 ${sc.detail._tech}/25、量價 ${sc.detail._vol}/15、籌碼 ${sc.detail._chip}/20、融資 ${sc.detail._margin}/10、題材 ${sc.detail._theme}/10。`,
-    `（適用滿分 ${sc.applicable}；其中 ${sc.applicable - sc.known} 分的項目資料不足、未計分${sc.naKeys && sc.naKeys.length ? "；ETF 不適用基本面、融資與題材項目，這部分不計分也不從分母扣除，分數不宜與個股直接比較" : ""}。）`,
+    `綜合評分 ${scoreTxt}：${partsTxt}。`,
+    `（適用滿分 ${sc.applicable}；其中 ${sc.applicable - sc.known} 分的項目資料不足、未計分${sc.naKeys && sc.naKeys.length ? "；ETF 不適用基本面與題材項目，這部分不計分也不從分母扣除，分數不宜與個股直接比較" : ""}。）`,
     ...vote.categories.map((c) => `【${c.name}：${c.sign > 0 ? "偏多" : c.sign < 0 ? "偏空" : "互相抵銷"}】` + c.items.map((x) => x[1]).join("、")),
     has && tr && sc.detail._tech <= 5 && trendOk ? "【時間尺度】評分的技術面（站上月線、月線與季線方向、20 日突破）衡量 1～3 個月的結構，目前偏弱；趨勢模板衡量 50～200 日的長期結構，目前仍成立。兩者不矛盾，代表長期趨勢中的短中期修正。" : "",
     has && tr && sc.detail._tech >= 20 && trendState === "no" ? "【時間尺度】短中期技術面偏強，但長期趨勢模板未成立：屬於長期結構尚未轉強時的反彈或初升。" : "",

@@ -64,14 +64,18 @@ async function build(src, code) {
   if (h) {
     const divEv = ok(rd) && ok(rd).events; let actions = [];
     try { actions = ((await src.getSplitMap()).get(code)) || []; } catch (e) { actionsOk = false; }
-    adj = Q.adjustPrices(h, divEv, actions);
+    adj = Q.adjustPrices(h, divEv, actions, { limit: Q.limitFor(code) });
     if (adj.unexplained.length && src.getCapitalReductions) { // 仍有查無公告的異常跳動 → 再查減資參考價（多數股票不會走到這裡）
-      try { const red = await src.getCapitalReductions(code); if (red.length) adj = Q.adjustPrices(h, divEv, actions.concat(red)); } catch (e) { /* 查不到就維持不還原 */ }
+      try { const red = await src.getCapitalReductions(code); if (red.length) adj = Q.adjustPrices(h, divEv, actions.concat(red), { limit: Q.limitFor(code) }); } catch (e) { /* 查不到就維持不還原 */ }
     }
   }
-  const hp = adj ? adj.price : null, ht = adj ? adj.total : null;
+  let hp = adj ? adj.price : null, ht = adj ? adj.total : null, cut = null;
+  // 有「超過漲跌幅限制、查無任何公告」的跳動：無法判斷是真實行情還是未收錄的公司行動，
+  // 所以所有價格類計算（指標、報酬、波動、回撤、訊號統計、趨勢模板）只用最後一次跳動「當天起」的資料；長度不足的指標就不計算
+  if (adj && adj.unexplained.length) { const a1 = Q.cutAfterJumps(hp, adj.unexplained), a2 = Q.cutAfterJumps(ht, adj.unexplained); if (a1.cutFrom) { hp = a1.series; ht = a2.series; cut = { from: a1.cutFrom, dropped: a1.dropped, kept: hp.closes.length }; } }
+  const divOk = rd.status === "fulfilled"; // 取得成功但查無紀錄（從未配息）也算可用；只有請求失敗才算缺資料
   const intraday = !!quote.realtime;
-  const indicators = hp ? snapshot(hp) : null;
+  const indicators = hp && hp.closes.length >= 30 ? snapshot(hp) : null;
   if (indicators && intraday && hp.closes.length > 31) {
     // 盤中的成交量只累計到當下，不能和「完整交易日」的均量相比 → 量能欄位改用前一個完整交易日
     const cut = (x) => x.slice(0, -1), prev = snapshot({ dates: cut(hp.dates), opens: cut(hp.opens), highs: cut(hp.highs), lows: cut(hp.lows), closes: cut(hp.closes), volumes: cut(hp.volumes) });
@@ -115,8 +119,8 @@ async function build(src, code) {
 
   const scored = scoreStock({ snap: Object.assign({}, row || {}, { isETF: quote.isETF }), ind: indicators, chip, margin, fund: fundamentals, sector, holding });
   // 量化模組
-  const rs2 = hp ? Q.relStrength(hp, index, ht, adj ? adj.unexplained : []) : null;
-  const quant = hp ? { risk: Q.riskMetrics(ht, index, hp), rs: rs2, trend: Q.trendTemplate(hp, rs2), turtle: Q.turtle(hp), events: Q.eventStudy(ht), factors: Q.factors(ht) } : null;
+  const rs2 = indicators ? Q.relStrength(hp, index, divOk ? ht : null, adj ? adj.unexplained : []) : null; // 股利資料缺：不提供「含息」報酬
+  const quant = indicators ? { risk: Q.riskMetrics(ht, index, hp), rs: rs2, trend: Q.trendTemplate(hp, rs2), turtle: Q.turtle(hp), events: Q.eventStudy(ht), factors: Q.factors(ht) } : null;
   let market = null; // 大盤狀態（順勢交易的前提）
   if (index) { const ic = index.closes, m = (p) => (ic.length >= p ? ic.slice(-p).reduce((a, x) => a + x, 0) / p : null), last = ic[ic.length - 1];
     market = { date: index.dates[index.dates.length - 1], close: round(last), ma50: round(m(50)), ma200: round(m(200)), above50: m(50) !== null && last > m(50), above200: m(200) !== null && last > m(200), ret20: round((last / ic[ic.length - 21] - 1) * 100), ret60: round((last / ic[ic.length - 61] - 1) * 100) }; }
@@ -126,7 +130,7 @@ async function build(src, code) {
   if (!holding) missing.push("外資持股"); if (!index) missing.push("大盤指數");
   if (!indicators) missing.push("歷史K線"); if (!chip) missing.push(row && row.inst ? "三大法人歷史（僅有當日）" : "三大法人"); if (!margin && !quote.isETF) missing.push("融資融券"); if (!revenue && !quote.isETF && fundamentals.revYoY === null) missing.push("月營收");
   const out = { code, quote, indicators, chip, margin, fundamentals, revenue, sector, scored, missing, instToday: row ? row.inst : null, marginToday: row ? row.margin : null, intraday,
-    adjust: adj ? { splits: adj.splits, unexplained: adj.unexplained, dividendsApplied: adj.dividendsApplied, dividendsAvailable: !!(ok(rd) && ok(rd).events), actionsAvailable: actionsOk } : null,
+    adjust: adj ? { splits: adj.splits, unexplained: adj.unexplained, cut, dividendsApplied: adj.dividendsApplied, dividendsAvailable: divOk, actionsAvailable: actionsOk } : null,
     asOf: { quote: quote.time || quote.date || null, snapshot: row ? row.date : null, kline: h ? h.dates[h.dates.length - 1] : null, chip: chip ? chip[chip.length - 1].date : null, margin: margin ? margin[margin.length - 1].date : null,
       revenue: revenue ? revenue.ym : null, financials: fin && fin.length ? fin[fin.length - 1].label : null, holding: holding ? holding.date : null, index: index ? index.dates[index.dates.length - 1] : null },
     financials: fin, balance: bal, dividends, holding, news, quant, market, coverage: { got: [snapAll, hist, chip, margin, etfCode || revenue, etfCode || per, etfCode || fin, etfCode || bal, dividends, holding, index].filter(Boolean).length, total: 11 }, _v: VERSION, demo: !!src.demo,

@@ -735,7 +735,19 @@ function renderReport(code, text, scored, data, isAI) {
       { label:"融資",   val: d._margin|| 0, max: 10, color:"#f87171" },
       { label:"題材",   val: d._theme || 0, max: 10, color:"#fbbf24" },
     ];
+    // 面向狀態：全部不適用／全部缺資料時不畫成 0 分（與後端 scoring.groupState 同一規則）
+    var GK = { "基本面": ["rev_yoy","eps_growth","roe","margin_stable"], "技術面": ["above_ma20","ma20_up","ma60_up","ma_bull","breakout"], "量價": ["up_vol","down_vol","vol_above_avg"],
+               "籌碼": ["foreign_buy","site_buy","inst_total","big_player"], "融資": ["margin_health","margin_decrease"], "題材": ["theme_main","theme_support"] };
+    var naK = scored.naKeys || [], msK = scored.missingKeys || [];
+    function gState(label) { var ks = GK[label] || [], na = ks.filter(function(k){ return naK.indexOf(k) >= 0; }).length, ms = ks.filter(function(k){ return msK.indexOf(k) >= 0; }).length;
+      return !ks.length ? "ok" : na === ks.length ? "不適用" : na + ms === ks.length ? "資料不足" : ms ? "partial" : "ok"; }
     var barsHtml = bars.map(function(b) {
+      var st = gState(b.label);
+      if (st === "不適用" || st === "資料不足")
+        return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px">'
+          + '<div style="width:36px;font-size:10px;color:var(--text3);text-align:right;flex-shrink:0">' + b.label + '</div>'
+          + '<div style="flex:1;border:1px dashed var(--border2);border-radius:3px;height:8px"></div>'
+          + '<div style="width:32px;font-size:10px;color:var(--text3);white-space:nowrap">' + st + '</div></div>';
       var pct = b.max > 0 ? Math.round(b.val / b.max * 100) : 0;
       return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px">'
         + '<div style="width:36px;font-size:10px;color:var(--text3);text-align:right;flex-shrink:0">' + b.label + '</div>'
@@ -778,7 +790,7 @@ function renderReport(code, text, scored, data, isAI) {
         + '</div>';
     }).join("");
 
-    var naNote = (scored.naKeys && scored.naKeys.length) ? '<div class="note" style="text-align:left;margin-top:6px">ETF 不適用基本面、融資與題材項目：這些項目不計分，也不從 100 分的分母扣除；不同類型標的的分數不宜直接比較。</div>' : "";
+    var naNote = (scored.naKeys && scored.naKeys.length) ? '<div class="note" style="text-align:left;margin-top:6px">ETF 不適用基本面與題材項目：這些項目不計分，也不從 100 分的分母扣除；不同類型標的的分數不宜直接比較。</div>' : "";
     scoreCard = '<div style="background:var(--bg3);border:1px solid ' + grColor + ';border-radius:8px;padding:14px 16px;margin-bottom:16px">'
       // 標題列
       + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">'

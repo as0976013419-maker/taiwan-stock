@@ -13,7 +13,7 @@ const DEMO = process.env.DEMO === "1";
 const src = DEMO ? require("./src/demo") : require("./src/sources");
 const { runScan } = require("./src/scan");
 const { analyze } = require("./src/analyze");
-const { adjustPrices } = require("./src/quant");
+const { adjustPrices, limitFor } = require("./src/quant");
 const ai = require("./src/ai");
 
 const PORT = process.env.PORT || 3001;
@@ -73,11 +73,17 @@ async function api(req, res, url, ip) {
     if (!validCode(code) || !validDate(start) || !validDate(end) || start > end) return send(res, 400, { error: "參數錯誤：code=代號, start/end=YYYY-MM-DD" });
     if (limited(ip, "history", 60, 60000)) return send(res, 429, { error: "請求過於頻繁" });
     const raw = await src.getHistory(code.toUpperCase(), start, end);
-    let h = raw, splitAdjusted = [];
-    try { const acts = src.getSplitMap ? (await src.getSplitMap()).get(code.toUpperCase()) : null;
-      if (acts && raw.closes.length > 1) { const a = adjustPrices(raw, null, acts); if (a.splits.length) { h = a.price; splitAdjusted = a.splits; } }
-    } catch (e) { /* 清單取不到：回傳原始價格，行為與舊版相同 */ }
-    return send(res, 200, Object.assign({}, h, { demo: DEMO, splitAdjusted }), { "Cache-Control": "public, max-age=300" });
+    let h = raw, splitAdjusted = [], unexplained = null, checkNote = null; const C = code.toUpperCase();
+    let acts = null, divEv = null;
+    try { acts = src.getSplitMap ? ((await src.getSplitMap()).get(C) || []) : []; } catch (e) { checkNote = "官方股數變動清單取得失敗"; }
+    try { const dv = src.getDividends ? await src.getDividends(C) : null; divEv = dv && dv.events ? dv.events : []; /* 回傳 null 代表查無股利紀錄（從未配息），不是取得失敗 */ } catch (e) { checkNote = checkNote || "股利資料取得失敗"; }
+    if (raw.closes.length > 1) {
+      const a = adjustPrices(raw, divEv, acts || [], { limit: limitFor(C) });
+      if (a.splits.length) { h = a.price; splitAdjusted = a.splits; } // 回測使用可交易價位：只還原股數變動，不還原現金股利
+      // 只有在分割清單與股利資料都取得時，才能區分「無法解釋的跳動」與正常除息；否則回報未檢查，不冒然判定
+      if (acts && divEv) unexplained = a.unexplained;
+    }
+    return send(res, 200, Object.assign({}, h, { demo: DEMO, splitAdjusted, unexplained, checkNote }), { "Cache-Control": "public, max-age=300" });
   }
   if (p === "/analyze" && req.method === "POST") {
     if (limited(ip, "analyze", 30, 60000)) return send(res, 429, { error: "分析次數過於頻繁，請稍後再試" });

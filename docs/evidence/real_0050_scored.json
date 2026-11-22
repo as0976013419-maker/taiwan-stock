@@ -1,0 +1,49 @@
+{
+ "code": "0050",
+ "quote": {
+  "price": 84.45,
+  "date": "2026-11-20",
+  "source": "證交所 OpenAPI 日收盤"
+ },
+ "scored": {
+  "score": 16,
+  "grade": "不分級（ETF）",
+  "applicable": 70,
+  "known": 70,
+  "naKeys": [
+   "rev_yoy",
+   "eps_growth",
+   "roe",
+   "margin_stable",
+   "theme_main",
+   "theme_support"
+  ],
+  "missingKeys": [],
+  "parts": {
+   "fund": 0,
+   "tech": 0,
+   "vol": 5,
+   "chip": 6,
+   "margin": 5,
+   "theme": 0
+  }
+ },
+ "adjust": {
+  "splits": [
+   {
+    "date": "2025-06-18",
+    "ratio": 4.0002,
+    "type": "分割",
+    "before": 188.65,
+    "after": 47.16,
+    "official": true
+   }
+  ],
+  "unexplained": [],
+  "cut": null,
+  "dividendsApplied": 10,
+  "dividendsAvailable": true,
+  "actionsAvailable": true
+ },
+ "missing": []
+}
