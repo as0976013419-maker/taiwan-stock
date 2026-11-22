@@ -134,15 +134,15 @@ test("部位試算：風險金額 ÷ 停損距離", () => {
   assert.strictEqual(z[0].shares, 2000); assert.strictEqual(z[0].stop, 95); assert.strictEqual(z[0].value, 200000); assert.strictEqual(z[0].weight, 20);
   assert.strictEqual(Q.sizing(100, null, []), null, "沒有 ATR 時不得試算");
 });
-test("歷史訊號統計：進場用隔日開盤、隨機資料不得出現顯著訊號、樣本不足要標示", async () => {
+test("歷史訊號統計：進場用隔日開盤、不輸出沒有根據的顯著性、樣本少要標示", async () => {
   const h = await demo.getHistory("2330", "2019-01-01"), ev = Q.eventStudy(h);
   // 前視偏誤檢查：把「訊號日之後」的價格全部改掉，訊號日期本身不能改變
   const cut = 900, h2 = { code: h.code, dates: h.dates.slice(0, cut), opens: h.opens.slice(0, cut), highs: h.highs.slice(0, cut), lows: h.lows.slice(0, cut), closes: h.closes.slice(0, cut), volumes: h.volumes.slice(0, cut) };
   const e2 = Q.eventStudy(h2);
   for (const e of ev.events) { const x = e2.events.find((y) => y.key === e.key); assert.ok(x.count <= e.count, e.key + "：截斷資料後事件數不應變多"); }
-  for (const e of ev.events) for (const x of e.h) { assert.ok(["insufficient", "none", "weak", "strong"].includes(x.grade)); if (x.n) { assert.ok(x.indep <= x.n); if (x.indep < 10) assert.strictEqual(x.grade, "insufficient"); } }
-  // 示範資料是隨機漫步：做了多重檢定校正後，不應有任何訊號被判為「顯著」
-  assert.strictEqual(ev.events.filter((e) => e.h.some((x) => x.grade === "strong")).length, 0);
+  // 沒有有效的顯著性檢定：不得輸出 t 值或強弱分級，一律標示未驗證；只保留描述統計
+  for (const e of ev.events) for (const x of e.h) { assert.strictEqual(x.significance, "unverified"); assert.strictEqual(x.t, undefined); assert.strictEqual(x.grade, undefined);
+    if (x.n) { assert.ok(x.nonOverlap <= x.n); assert.strictEqual(x.smallSample, x.nonOverlap < 10); } }
   assert.strictEqual(ev.cost, 0.585);
 });
 test("缺漏值不得當成 0：沒有財報時 EPS／ROE 相關欄位為 null，評分顯示「—」", () => {
@@ -345,6 +345,9 @@ test("回測：只選一年時仍可交易（舊版固定暖機 250 根導致零
   assert.strictEqual(r.diag.warmup, 21); assert.ok(r.diag.entrySignals > 0); assert.ok(r.metrics.tradeCount > 0, "一年區間應有交易");
   const first = r.trades[0], i = d.dates.indexOf(first.date); assert.strictEqual(first.price, d.opens[i], "隔日開盤模式以開盤價成交");
   const poor = B.run(JSON.parse(JSON.stringify(d)), cfg(1000)); assert.strictEqual(poor.metrics.tradeCount, 0); assert.ok(poor.diag.rejectedCash > 0 && poor.diag.minCashNeeded > 1000);
+  // 拒單所需金額：最小與最大值分別等於各次拒單「一張含費」金額的最小與最大（舊版只記最大值卻寫成「約需」）
+  const need = poor.diag.entryLog.filter((e) => !e.filled).map((e) => e.perLot);
+  assert.ok(need.length >= 2); assert.strictEqual(poor.diag.minCashNeeded, Math.min(...need)); assert.strictEqual(poor.diag.maxCashNeeded, Math.max(...need));
   // 舊格式（只有策略代號、沒有參數）維持舊的 250 根暖機
   assert.strictEqual(B.run(JSON.parse(JSON.stringify(d)), Object.assign(cfg(5000000), { longEntry: ["ma_golden"], longExit: ["ma_death"] })).diag.warmup, 251);
 });
@@ -435,4 +438,68 @@ test("不變式：標為不適用的項目得分必須為 0（以真實結構的
   const sc = S2.scoreStock({ snap, ind: null, fund: {}, sector: null });
   for (const k of sc.naKeys) assert.ok(sc.detail[k] === "—" || sc.detail[k] === "0", k + " 不適用卻得分：" + sc.detail[k]);
   assert.ok(sc.detail._margin > 0, "ETF 的融資資料應計分"); assert.ok(!sc.naKeys.includes("margin_health"));
+});
+
+test("報告不得引用沒有根據的統計證據（顯著、校正後門檻、強／弱證據）", async () => {
+  const U = require("../src/util");
+  for (const code of ["2330", "2603", "0050"]) { U._test_clear(); const a = await analyzeFn(demo, code);
+    assert.ok(!/達校正後門檻|弱（未校正）|與基準無法區分|證據：/.test(a.text), code); assert.ok(/顯著性未驗證|未驗證/.test(a.text)); assert.ok(!/獨立樣本|獨立 \d+ 次/.test(a.text), code + "：不重疊不等於獨立"); }
+});
+test("資料不足 250 根：52 週、250 日波動與趨勢模板第 6、7 項不計算，其他指標以實際天數標示", async () => {
+  const U = require("../src/util"); U._test_clear(); const a = await analyzeFn(srcWith({ getHistory: cutHist(230) }), "2330");
+  assert.strictEqual(a.indicators.hi250, null); assert.strictEqual(a.indicators.pos250, null); assert.strictEqual(a.quant.risk.vol250, null);
+  assert.strictEqual(a.quant.trend.checks[5].pass, null); assert.strictEqual(a.quant.trend.checks[6].pass, null);
+  assert.ok(/52 週區間 \| 資料不足/.test(a.text)); assert.ok(!/— ~ —/.test(a.text), "不足 250 根時不得出現空白區間"); assert.ok(a.text.includes(`近 ${a.quant.risk.days} 個交易日最大回撤`)); assert.ok(!/一年最大回撤|（一年）/.test(a.text));
+});
+test("Codex 反例 B／C：停利以觸發價成交；移動停損讀取物件形式與參數（多空、開盤與收盤模式）", () => {
+  const B = vmLoad(), mk = (c, o) => { const d = ohlc(c, o); return JSON.parse(JSON.stringify(d)); };
+  // B：100 元進場，次日開盤 130、收盤 90，停利 25%：舊版以 90 元出場、理由仍是停利（淨損 -94,866.75）
+  let c = Array(60).fill(90).concat([100, 90, 90]), o = c.slice(); c[59] = 95; o[60] = 100; o[61] = 130;
+  let r = B.run(mk(c, o), btCfg({ execType: "open", stopProfit: 25, longEntry: [{ id: "price_above_ma", params: { period: 20 } }], longExit: [] }));
+  let x = r.trades.find((t) => t.type === "exit"); assert.strictEqual(x.price, 130); assert.strictEqual(x.reason, "stopProfit"); assert.ok(x.netPnl > 0);
+  c = Array(60).fill(110).concat([100, 110, 110]); o = c.slice(); c[59] = 105; o[60] = 100; o[61] = 70;
+  r = B.run(mk(c, o), btCfg({ execType: "open", stopProfit: 25, longEntry: [], longExit: [], shortEnabled: true, shortEntry: [{ id: "s_price_below_ma", params: { period: 20 } }], shortExit: [] }));
+  x = r.trades.find((t) => t.type === "exit"); assert.strictEqual(x.price, 70); assert.ok(x.netPnl > 0);
+  // C：收盤升到 120 再跌到 108，移動停損 8%（物件形式）→ 108 ≤ 120×0.92 出場；5%、10% 驗證有讀參數
+  c = Array(60).fill(90).concat([100, 110, 120, 108, 108]); c[59] = 100;
+  const trail = (pct) => B.run(mk(c), btCfg({ execType: "close", longEntry: [{ id: "price_above_ma", params: { period: 20 } }], longExit: [{ id: "trailing_stop", params: { pct } }] }));
+  x = trail(8).trades.find((t) => t.type === "exit"); assert.strictEqual(x.reason, "trailingStop"); assert.strictEqual(x.price, 108);
+  assert.ok(trail(10).trades.find((t) => t.type === "exit"), "10%：108 ≤ 120×0.9=108 → 出場"); assert.ok(!trail(12).trades.find((t) => t.type === "exit"), "12%：108 > 105.6 → 不出場");
+  // 空單
+  c = Array(60).fill(110).concat([100, 90, 80, 87, 87]); c[59] = 100;
+  r = B.run(mk(c), btCfg({ execType: "close", longEntry: [], longExit: [], shortEnabled: true, shortEntry: [{ id: "s_price_below_ma", params: { period: 20 } }], shortExit: [{ id: "s_trailing", params: { pct: 8 } }] }));
+  x = r.trades.find((t) => t.type === "exit"); assert.strictEqual(x.reason, "trailingStop"); assert.strictEqual(x.price, 87);
+  // open 模式時間順序：開盤 112 時只知道最高收盤 120（回撤 6.7% 未達 8%），不得用當日收盤 100 提前觸發；隔日開盤 100 才出場
+  c = Array(60).fill(90).concat([100, 110, 120, 100, 100, 100]); o = c.slice(); c[59] = 95; o[60] = 100; o[63] = 112; o[64] = 100;
+  r = B.run(mk(c, o), btCfg({ execType: "open", longEntry: [{ id: "price_above_ma", params: { period: 20 } }], longExit: [{ id: "trailing_stop", params: { pct: 8 } }] }));
+  x = r.trades.find((t) => t.type === "exit"); assert.strictEqual(x.date, o.length ? ohlc(c, o).dates[64] : null); assert.strictEqual(x.price, 100);
+});
+test("Codex 反例 D：80 根人工日 K 從 100 跳到 50（查無公告），不得輸出跨越斷點的風險指標", async () => {
+  const U = require("../src/util"); U._test_clear();
+  const src = srcWith({ getHistory: async (c) => { const h = flat(80, (i) => (i < 40 ? 100 : 50)); h.code = c; h.volumes = h.closes.map(() => 1e6); return h; }, getQuote: async () => null,
+    getMarketSnapshot: async () => ({ stocks: new Map() }) });
+  const a = await analyzeFn(src, "2330"); assert.strictEqual(a.adjust.unexplained.length, 1); assert.strictEqual(a.adjust.cut.kept, 40);
+  assert.ok(a.quant === null || a.quant.risk === null, "跳動後只有 40 根（<60），風險指標不得計算"); assert.ok(!/-50/.test(JSON.stringify(a.quant && a.quant.risk)));
+  // 掃描路徑：跳動序列（前 150 根 0.45p，之後 50 根緩升到快照價 p）的評分，必須等於只給跳動後 50 根的評分
+  const snap = await demo.getMarketSnapshot(), p = (c) => snap.stocks.get(c).price;
+  const jump = (c) => { const h = flat(200, (i) => (i < 150 ? 0.45 * p(c) : p(c) * (0.9 + 0.1 * (i - 150) / 49))); h.code = c; h.volumes = h.closes.map(() => 1e6); return h; };
+  const post = (c) => { const h = jump(c); for (const k of ["dates", "opens", "highs", "lows", "closes", "volumes"]) h[k] = h[k].slice(150); return h; };
+  const cols = (r) => r.stocks.map((x) => [x.code, x.techScore, x.volScore, x.score].join(":"));
+  U._test_clear(); const r1 = await runScan(srcWith({ getHistory: async (c) => jump(c) }), { mode: "volume", limit: 8 });
+  U._test_clear(); const r2 = await runScan(srcWith({ getHistory: async (c) => post(c) }), { mode: "volume", limit: 8 });
+  assert.strictEqual(r1.stocks.length, 8); assert.deepStrictEqual(cols(r1), cols(r2));
+});
+test("回測期間內有官方股數變動：診斷要揭露換算單位（變動前的張數不是當時可交易的整張）", () => {
+  const B = vmLoad(), c = Array.from({ length: 120 }, (_, i) => 100 + (i % 20 < 10 ? i % 20 : 20 - (i % 20))), d = ohlc(c), mid = d.dates[90], early = d.dates[10];
+  const sa = [{ date: mid, ratio: 4.0002, type: "分割", before: 188.65, after: 47.16, official: true }];
+  let r = B.run(JSON.parse(JSON.stringify(d)), btCfg({ tradeStart: d.dates[60], splitAdjusted: sa }));
+  const J = (x) => JSON.parse(JSON.stringify(x)); // 引擎在 vm 中執行，物件原型不同
+  assert.deepStrictEqual(J(r.diag.shareChanges), [{ date: mid, type: "分割", ratio: 4.0002, before: 188.65, after: 47.16 }]); assert.ok(r.diag.entriesBeforeShareChange > 0, "測試資料要有變動前的進場");
+  assert.strictEqual(r.diag.entriesBeforeShareChange, r.trades.filter((t) => t.type === "entry" && t.date < mid).length);
+  // 變動發生在回測起始日之前：期間內的價格都是變動後的實際單位，不需揭露
+  r = B.run(JSON.parse(JSON.stringify(d)), btCfg({ tradeStart: d.dates[60], splitAdjusted: [Object.assign({}, sa[0], { date: early })] }));
+  assert.deepStrictEqual(J(r.diag.shareChanges), []);
+  // 畫面文字
+  const ui = require("fs").readFileSync(require("path").join(__dirname, "../../frontend/js/bt-ui.js"), "utf8");
+  assert.ok(/config\.splitAdjusted = Array\.isArray\(data\.splitAdjusted\)/.test(ui)); assert.ok(ui.includes("不是當時實際成交的重現"));
 });

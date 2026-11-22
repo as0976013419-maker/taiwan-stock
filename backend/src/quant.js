@@ -84,7 +84,7 @@ function riskMetrics(hist, idx, priceHist) {
   const val20 = mean(ph.closes.slice(-20).map((x, i) => x * ph.volumes[n - 20 + i])); // 成交值＝實際價格 × 實際股數
   return {
     days: win, atr14: round(a14), atr20: round(a20), atrPct: a14 ? round(a14 / lastPx * 100) : null,
-    vol20: round(volOf(20), 1), vol60: round(volOf(60), 1), vol250: round(volOf(Math.min(250, r.length)), 1),
+    vol20: round(volOf(20), 1), vol60: round(volOf(60), 1), vol250: r.length >= 250 ? round(volOf(250), 1) : null,
     maxDD: round(mdd * 100, 1), curDD: round((c[n - 1] / hi - 1) * 100, 1),
     var95: round(var95 * 100), cvar95: round(mean(tail) * 100), worstDay: round(Math.min(...r) * 100), bestDay: round(Math.max(...r) * 100),
     sharpe: s ? round(m / s * ann) : null, sortino: dd ? round(m / dd * ann) : null,
@@ -122,14 +122,14 @@ function trendTemplate(hist, rs) {
     ["200 日均線至少上升一個月", m200[i] > m200[i - 20], `${round(m200[i - 20])} → ${round(m200[i])}`],
     ["50 日 > 150 日 > 200 日均線", m50[i] > m150[i] && m150[i] > m200[i], `${round(m50[i])} / ${round(m150[i])} / ${round(m200[i])}`],
     ["股價高於 50 日均線", p > m50[i], `${round(p)} vs ${round(m50[i])}`],
-    ["股價高於 52 週低點至少 30%", p >= lo52 * 1.3, `高於低點 ${round((p / lo52 - 1) * 100, 1)}%`],
-    ["股價距 52 週高點 25% 以內", p >= hi52 * 0.75, `距高點 ${round((p / hi52 - 1) * 100, 1)}%`],
+    ["股價高於 52 週低點至少 30%", n >= 250 ? p >= lo52 * 1.3 : null, n >= 250 ? `高於低點 ${round((p / lo52 - 1) * 100, 1)}%` : `資料僅 ${n} 根，不足 52 週`],
+    ["股價距 52 週高點 25% 以內", n >= 250 ? p >= hi52 * 0.75 : null, n >= 250 ? `距高點 ${round((p / hi52 - 1) * 100, 1)}%` : `資料僅 ${n} 根，不足 52 週`],
     ["相對強度優於大盤（6 個月與 1 年超額報酬為正）", e6 !== null && e12 !== null ? e6 > 0 && e12 > 0 : null, e6 === null ? "無大盤資料" : `6 個月 ${e6 > 0 ? "+" : ""}${e6}%、1 年 ${e12 === null ? "—" : (e12 > 0 ? "+" : "") + e12 + "%"}`],
   ].map(([name, pass, detail]) => ({ name, pass, detail }));
   // 階段分析（以 150 日均線≈30 週線的方向與股價位置判定）
   const slope = (m150[i] / m150[i - 20] - 1) * 100, prior = n > 271 ? (c[i - 20] / c[i - 140] - 1) * 100 : 0;
   const stage = p > m150[i] && slope > 1 ? 2 : p < m150[i] && slope < -1 ? 4 : prior < 0 ? 1 : 3;
-  return { checks, passed: checks.filter((x) => x.pass === true).length, total: checks.filter((x) => x.pass !== null).length, m50: round(m50[i]), m150: round(m150[i]), m200: round(m200[i]), hi52: round(hi52), lo52: round(lo52), slope150: round(slope), stage,
+  return { checks, passed: checks.filter((x) => x.pass === true).length, total: checks.filter((x) => x.pass !== null).length, m50: round(m50[i]), m150: round(m150[i]), m200: round(m200[i]), hi52: n >= 250 ? round(hi52) : null, lo52: n >= 250 ? round(lo52) : null, slope150: round(slope), stage,
     stageName: ["", "第一階段：打底", "第二階段：上升", "第三階段：做頭", "第四階段：下降"][stage] };
 }
 
@@ -165,9 +165,9 @@ function eventStudy(hist) {
   const fwd = (i, k) => (i + 1 + k < n && o[i + 1] > 0 ? (c[i + k + 1] / o[i + 1] - 1) * 100 : null);
   const stat = (idxs, k) => {
     const rs = idxs.map((i) => fwd(i, k)).filter((x) => x !== null); if (!rs.length) return { n: 0 };
-    // 獨立樣本數：持有期互不重疊的事件數（重疊的事件其實是同一段行情，不能當成獨立證據）
-    let indep = 0, lastEnd = -1; for (const i of idxs) { if (fwd(i, k) === null) continue; if (i > lastEnd) { indep++; lastEnd = i + k; } }
-    return { n: rs.length, indep, win: round(rs.filter((x) => x > 0).length / rs.length * 100, 0), mean: round(mean(rs)), median: round(median(rs)), sd: rs.length > 1 ? round(std(rs)) : null };
+    // 不重疊事件數：持有期互不重疊的事件數。不重疊≠獨立（價格自我相關、與基準共用同一段資料，仍彼此相依）
+    let nonOverlap = 0, lastEnd = -1; for (const i of idxs) { if (fwd(i, k) === null) continue; if (i > lastEnd) { nonOverlap++; lastEnd = i + k; } }
+    return { n: rs.length, nonOverlap, win: round(rs.filter((x) => x > 0).length / rs.length * 100, 0), mean: round(mean(rs)), median: round(median(rs)), sd: rs.length > 1 ? round(std(rs)) : null };
   };
   const all = []; for (let i = start; i < n; i++) all.push(i);
   const baseline = H.map((k) => stat(all, k));
@@ -175,9 +175,12 @@ function eventStudy(hist) {
     const idxs = []; for (let i = start; i < n; i++) { try { if (fn(i)) idxs.push(i); } catch (e) { /* 指標尚未就緒 */ } }
     const last = idxs.length ? idxs[idxs.length - 1] : -1;
     const h = H.map((k, j) => { const x = stat(idxs, k), b = baseline[j];
-      if (x.n && x.sd && x.indep >= 2) { x.excess = round(x.mean - b.mean); x.t = round((x.mean - b.mean) / (x.sd / Math.sqrt(x.indep))); x.net = round(x.mean - COST); }
-      // 證據等級：獨立樣本 < 10 → 不足；|t| ≥ 2.9（對 33 組檢定做 Bonferroni 校正後約 5% 水準）→ 顯著；|t| ≥ 2 → 僅未校正下顯著；其餘 → 與基準無法區分
-      x.grade = !x.n || x.indep < 10 ? "insufficient" : Math.abs(x.t) >= 2.9 ? "strong" : Math.abs(x.t) >= 2 ? "weak" : "none"; return x; });
+      // 只提供描述統計：與基準的平均差、扣成本後的平均。
+      // 舊版以「不重疊事件數」配上「全部重疊事件的標準差」算 t 值，並用固定門檻 2.9 宣稱 Bonferroni 校正——
+      // 這個門檻與標準誤都沒有根據（33 組雙尾 5% 的常態臨界值約 3.17，且事件相依、自由度未定），已移除。
+      // 在實作出有效檢定之前，顯著性一律為 "unverified"。
+      if (x.n && x.sd && x.nonOverlap >= 2) { x.excess = round(x.mean - b.mean); x.net = round(x.mean - COST); } // 與舊版相同的輸出條件（只移除 t 與分級）
+      x.smallSample = !x.n || x.nonOverlap < 10; x.significance = "unverified"; return x; });
     let stateNow = null; if (stateFn) { try { stateNow = !!stateFn(n - 1); } catch (e) { stateNow = null; } }
     return { key, name, count: idxs.length, active: last >= n - 3, lastDate: last >= 0 ? hist.dates[last] : null, stateNow, h,
       pending: H.map((k) => idxs.filter((i) => i + 1 + k >= n).length) }; // 尚未走完持有期、已排除的事件數

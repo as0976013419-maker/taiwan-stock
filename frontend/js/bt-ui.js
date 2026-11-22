@@ -573,13 +573,16 @@ function diagHTML(dg, m, cfg) {
   if (dg.startDelayed) lines.push('起始日前的資料不足 ' + dg.lookback + ' 根（指標所需回看長度），' + dg.tradeFrom + ' 之前不交易，但這段仍計入績效期間。');
   else if (!dg.preBars) lines.push('前 ' + dg.warmup + ' 根 K 線用於指標暖機、不交易；可交易期間自 ' + (dg.tradeFrom || '—') + ' 起。');
   if (dg.corpChecked === false) lines.push('⚠ 資料來自備援來源，未檢查分割、面額變更或減資等公司行動；若期間內發生，結果會失真。');
+  if (dg.shareChanges && dg.shareChanges.length) lines.push('⚠ 回測期間內有官方股數變動：' + dg.shareChanges.map(function(x) { return x.date + ' ' + x.type + '（' + (x.before && x.after ? '公告參考價 ' + x.before + ' → ' + x.after + '，' : '') + '換算比例 ' + x.ratio + '）'; }).join('、') +
+    '。變動前的價格與成交量已依公告換算成目前的股數基礎，每筆交易的報酬率不受影響；但變動前的「張數」是換算後的單位：依參考價換算，當時的 1 張約等於現在的 ' + dg.shareChanges.map(function(x) { return x.ratio; }).join('、') +
+    ' 張，整張取捨與升降單位都和當時實際可交易的不同，所以部位大小、損益金額與權益曲線會和當時實際做得到的結果有差異。' + (dg.entriesBeforeShareChange ? '本次有 ' + dg.entriesBeforeShareChange + ' 筆進場發生在變動前，' : '') + '這段屬於研究模擬，不是當時實際成交的重現。');
   lines.push('進場訊號 ' + dg.entrySignals + ' 次、出場訊號 ' + dg.exitSignals + ' 次；實際完成 ' + m.tradeCount + ' 筆交易。');
   if (dg.rejected) lines.push('有 ' + dg.rejected + ' 次進場訊號未成交' + (dg.rejectedCash ? '，其中 ' + dg.rejectedCash + ' 次是現金不足以買進一張（各次所需含手續費金額介於 ' + Number(dg.minCashNeeded).toLocaleString() + '～' + Number(dg.maxCashNeeded).toLocaleString() + ' 元，依當次成交參考價而定）。本系統以整張交易，未模擬零股。' : '。'));
   if (!dg.entrySignals && dg.bars + dg.preBars <= dg.warmup) lines.push('資料長度（' + dg.bars + ' 根）不足暖機期，請擴大回測區間。');
   else if (!dg.entrySignals) lines.push('可交易期間內沒有出現符合條件的進場訊號（共振門檻 ' + (cfg.scoreThreshold || 1) + ' 分）。');
   if (dg.openAtEnd) lines.push('回測結束時仍有未平倉部位，未計入已完成交易的統計。');
   if (dg.pendingAtEnd) lines.push('最後一天的訊號需在下一個交易日開盤執行，資料已結束，未成交。');
-  lines.push('停損與停利只在單一價格點檢查（開盤模式看開盤價、收盤模式看收盤價），觸發時以同一價格成交；未使用盤中最高、最低價，盤中觸及但未在該價格點觸及的情況不會出場。');
+  lines.push('停損、停利與移動停損只在單一價格點檢查（開盤模式看開盤價、收盤模式看收盤價），觸發時以同一價格成交；移動停損的最高（空單為最低）參考價也只用開盤與收盤價。未使用盤中最高、最低價，盤中觸及但未在該價格點觸及的情況不會出場。');
   if (cfg.execType === 'close') lines.push('「當日收盤成交」假設訊號出現當天就能用收盤價成交；但收盤確認的訊號要收盤後才知道，實務上做不到，結果會偏樂觀。較保守的設定是「隔日開盤」。');
   return '<div class="signal-box" style="margin-top:8px"><div class="signal-title">回測診斷</div><div style="font-size:11px;line-height:1.8;color:var(--text2)">' + lines.join('<br>') + '</div></div>';
 }
@@ -747,6 +750,7 @@ async function runBacktest() {
     config.tradeStart = start;
     config.unexplained = Array.isArray(data.unexplained) ? data.unexplained.map(function(x) { return x.date; }) : null;
     config.corpChecked = Array.isArray(data.unexplained); // 備援來源（直接打 FinMind）沒有公司行動檢查
+    config.splitAdjusted = Array.isArray(data.splitAdjusted) ? data.splitAdjusted : []; // 後端已依官方公告換算的股數變動
     setProgress(40,'共 '+data.closes.length+' 筆，啟動 Web Worker...');
 
     // 傳送 typed array 需先轉為普通陣列（postMessage structured clone）

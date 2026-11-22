@@ -91,7 +91,7 @@ function snapshot(hist) {
     upVolAvg: upN ? upV / upN : null, dnVolAvg: dnN ? dnV / dnN : null,
     hi20prev, lo20: minOf(l, i - 19, i), hi60, lo60, hi240, lo240,
     pos240: hi240 > lo240 ? (c[i] - lo240) / (hi240 - lo240) * 100 : null, // 一年區間位階 0~100
-    hi250, lo250, pos250: hi250 > lo250 ? (c[i] - lo250) / (hi250 - lo250) * 100 : null, span250: Math.min(250, n),
+    hi250: n >= 250 ? hi250 : null, lo250: n >= 250 ? lo250 : null, pos250: n >= 250 && hi250 > lo250 ? (c[i] - lo250) / (hi250 - lo250) * 100 : null, span250: Math.min(250, n),
     ret5: ret(5), ret20: ret(20), ret60: ret(60), ret240: ret(240), ret250: ret(250),
     maCross: cross(ma5, ma20), kdCross: cross(KD.K, KD.D), macdCross: cross(M.dif, M.dea),
     maBull: at(ma5) !== null && at(ma20) !== null && at(ma60) !== null && at(ma5) > at(ma20) && at(ma20) > at(ma60),

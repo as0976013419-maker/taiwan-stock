@@ -28,12 +28,14 @@ function universeOf(all, universe) {
   return byValue.slice(0, 150); // custom：成交值前 150 的熱門股池
 }
 async function withHistory(src, rows) {
-  const { mergeBar } = require("./analyze"), { adjustPrices } = require("./quant");
+  const { mergeBar } = require("./analyze"), { adjustPrices, cutAfterJumps, limitFor } = require("./quant");
   const hs = await mapLimit(rows, 4, (r) => src.getHistory(r.code, daysAgo(200)));
   let splits = new Map(); try { if (src.getSplitMap) splits = await src.getSplitMap(); } catch (e) { /* 清單取不到時維持原始價格 */ }
   return rows.map((r, i) => { if (!(hs[i] && hs[i].closes.length >= 30)) return { r, ind: null };
-    const merged = mergeBar(hs[i], r), acts = splits.get(r.code); // 沒有股數變動的股票（絕大多數）直接沿用原始序列
-    return { r, ind: snapshot(acts ? adjustPrices(merged, null, acts).price : merged) }; });
+    const merged = mergeBar(hs[i], r), a = adjustPrices(merged, null, splits.get(r.code) || [], { limit: limitFor(r.code) });
+    // 掃描沒有股利資料：大額除息也可能被列為無法解釋的跳動，此時只會讓可用資料變短（保守），不會產生跨越斷點的指標
+    const c = cutAfterJumps(a.price, a.unexplained).series;
+    return { r, ind: c.closes.length >= 30 ? snapshot(c) : null }; });
 }
 const base = (r) => ({ code: r.code, name: r.name, price: r.price, changePct: pctStr(r.changePct), volume: r.volume, sector: r.industry });
 

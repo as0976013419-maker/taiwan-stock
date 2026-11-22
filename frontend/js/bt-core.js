@@ -775,6 +775,13 @@ var ExecutionEngine = (function() {
     var shortEnabled  = !!config.shortEnabled;
 
     var longStrat  = { entry: config.longEntry  || [], exit: config.longExit  || [] };
+    // 移動停損：策略可能是字串（舊格式）或 {id, params}（目前 UI）；回撤比例讀使用者參數 pct（預設 5%）
+    function trailPct(list, id) {
+      for (var k = 0; k < (list || []).length; k++) { var s = list[k], sid = typeof s === 'string' ? s : (s && s.id);
+        if (sid === id) { var v = s && s.params && +s.params.pct; return (v > 0 ? v : 5) / 100; } }
+      return null;
+    }
+    var trailLong = trailPct(config.longExit, 'trailing_stop'), trailShort = config.shortEnabled ? trailPct(config.shortExit, 's_trailing') : null;
     var lookback = Math.max(lookbackOf(config.longEntry), lookbackOf(config.longExit),
       shortEnabled ? lookbackOf(config.shortEntry) : 0, shortEnabled ? lookbackOf(config.shortExit) : 0, 1) + 1;
     // config.tradeStart：使用者選的起始日。資料可以包含起始日前的 K 線（只用來暖機），交易只從起始日開始。
@@ -875,13 +882,13 @@ var ExecutionEngine = (function() {
         pendingReason = '';
       }
 
-      // ── 停損停利（當日收盤檢查，open 模式也一樣）──────────
+      // ── 停損、停利、移動停損：只在單一價格點檢查，並以同一價格成交 ──────────
+      //   open 模式：開盤時檢查開盤價（此時還不知道當日收盤價，所以先只用開盤價更新追蹤高／低點）
+      //   close 模式：收盤時檢查收盤價
       if (pf.position) {
-        portfolioUpdateMark(pf, closePrice);
-        var pos = pf.position;
-
-        // 跳空開盤停損（更真實：先用開盤價確認）
         var checkPrice = (execType === 'open') ? openPrice : closePrice;
+        portfolioUpdateMark(pf, checkPrice);   // 舊版在這裡用當日收盤價更新，open 模式會用到開盤當下尚不可知的價格
+        var pos = pf.position;
 
         if (pos.side === 'long') {
           var unrealPct = (checkPrice - pos.entryPrice) / pos.entryPrice;
@@ -891,11 +898,9 @@ var ExecutionEngine = (function() {
           } else if (stopProfitPct && unrealPct >= stopProfitPct) {
             var t = portfolioExitPosition(pf, checkPrice, date, sellFeeRate, 'stopProfit'); // 舊版以開盤價觸發、卻以收盤價成交
             if (t) trades.push(Object.assign({}, t, { type: 'exit', side: 'long', date: date, price: checkPrice, qty: t.qty }));
-          } else if (longStrat.exit.indexOf('trailing_stop') >= 0 && pf.position) {
-            if (closePrice < pf.position.trailHigh * 0.95) {
-              var t = portfolioExitPosition(pf, closePrice, date, sellFeeRate, 'trailingStop');
-              if (t) trades.push(Object.assign({}, t, { type: 'exit', side: 'long', date: date, price: closePrice, qty: t.qty }));
-            }
+          } else if (trailLong !== null && pf.position && checkPrice <= pf.position.trailHigh * (1 - trailLong)) {
+            var t = portfolioExitPosition(pf, checkPrice, date, sellFeeRate, 'trailingStop');
+            if (t) trades.push(Object.assign({}, t, { type: 'exit', side: 'long', date: date, price: checkPrice, qty: t.qty }));
           }
         } else if (pos.side === 'short') {
           var unrealPct = (pos.entryPrice - checkPrice) / pos.entryPrice;
@@ -905,11 +910,9 @@ var ExecutionEngine = (function() {
           } else if (stopProfitPct && unrealPct >= stopProfitPct) {
             var t = portfolioExitPosition(pf, checkPrice, date, sellFeeRate, 'stopProfit');
             if (t) trades.push(Object.assign({}, t, { type: 'exit', side: 'short', date: date, price: checkPrice, qty: t.qty }));
-          } else if (shortStrat.exit.indexOf('s_trailing') >= 0 && pf.position) {
-            if (closePrice > pf.position.trailLow * 1.05) {
-              var t = portfolioExitPosition(pf, closePrice, date, sellFeeRate, 'trailingStop');
-              if (t) trades.push(Object.assign({}, t, { type: 'exit', side: 'short', date: date, price: closePrice, qty: t.qty }));
-            }
+          } else if (trailShort !== null && pf.position && checkPrice >= pf.position.trailLow * (1 + trailShort)) {
+            var t = portfolioExitPosition(pf, checkPrice, date, sellFeeRate, 'trailingStop');
+            if (t) trades.push(Object.assign({}, t, { type: 'exit', side: 'short', date: date, price: checkPrice, qty: t.qty }));
           }
         }
       }
@@ -973,6 +976,12 @@ var ExecutionEngine = (function() {
 
     diag.pendingAtEnd = !!(pendingLongEntry || pendingShortEntry || pendingLongExit || pendingShortExit);
     diag.openAtEnd = !!pf.position;
+    // 期間內有官方股數變動（分割、反分割、面額變更）：變動前的價格已換算成目前股數基礎。
+    // 每筆交易的報酬率不受影響；但變動前的「張數」是換算後的單位，不是當時實際可買的整張，部位大小、損益金額與權益曲線會不同。
+    diag.shareChanges = (config.splitAdjusted || []).filter(function(x) { return x && x.date > diag.periodStart && x.date <= dates[n - 1]; })
+      .map(function(x) { return { date: x.date, type: x.type || '股數變動', ratio: +x.ratio, before: x.before, after: x.after }; });
+    if (diag.shareChanges.length) { var lastChg = diag.shareChanges[diag.shareChanges.length - 1].date;
+      diag.entriesBeforeShareChange = trades.filter(function(t) { return t.type === 'entry' && t.date < lastChg; }).length; }
     return { equity, trades, finalPortfolio: pf, diag: diag };
   }
 
