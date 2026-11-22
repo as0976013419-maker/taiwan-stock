@@ -35,10 +35,10 @@ function adjustPrices(hist, divEvents, actions, opts) {
     const x = ev.get(e.date) || { cash: 0, stock: 0 }; x.cash += e.cash || 0; x.stock += e.stock || 0; ev.set(e.date, x);
   }
   const act = new Map(); for (const x of actions || []) if (x.before > 0 && x.after > 0) act.set(x.date, x);
-  const fS = new Array(n).fill(1), fD = new Array(n).fill(1), splits = [], unexplained = []; let cs = 1, cd = 1, nDiv = 0, shareEvents = 0;
+  const fS = new Array(n).fill(1), fD = new Array(n).fill(1), splits = [], stockDividends = [], unexplained = []; let cs = 1, cd = 1, nDiv = 0, shareEvents = 0;
   for (let i = n - 1; i >= 1; i--) {
     fS[i] = cs; fD[i] = cd; const prev = c[i - 1], e = ev.get(d[i]), ac = act.get(d[i]); let ref = prev, share = 1;
-    if (e && prev > 0) { if (e.cash > 0 && e.cash < prev) { cd *= (prev - e.cash) / prev; ref = prev - e.cash; nDiv++; } if (e.stock > 0) { share = 1 / (1 + e.stock / 10); ref *= share; shareEvents++; } }
+    if (e && prev > 0) { if (e.cash > 0 && e.cash < prev) { cd *= (prev - e.cash) / prev; ref = prev - e.cash; nDiv++; } if (e.stock > 0) { share = 1 / (1 + e.stock / 10); ref *= share; shareEvents++; stockDividends.push({ date: d[i], type: "配股", stock: e.stock, ratio: round(1 + e.stock / 10, 4), source: "股利紀錄" }); } }
     if (ac) { const k = ac.after / ac.before; share *= k; ref *= k; splits.push({ date: d[i], ratio: round(ac.before / ac.after, 4), type: ac.type || "股數變動", before: ac.before, after: ac.after, official: true }); }
     const resid = ref > 0 ? c[i] / ref - 1 : 0;
     if (i >= 10 && limit !== null && Math.abs(resid) > limit) unexplained.push(known ? { date: d[i], movePct: round(resid * 100, 1) } : { date: d[i], movePct: round(resid * 100, 1), unverified: true }); // 超過漲跌幅限制（或分類不明時超過 10%）又查無公告
@@ -47,7 +47,8 @@ function adjustPrices(hist, divEvents, actions, opts) {
   fS[0] = cs; fD[0] = cd;
   const mk = (withDiv) => { const f = (i) => fS[i] * (withDiv ? fD[i] : 1); return { code: hist.code, dates: d, opens: o.map((x, i) => x * f(i)), highs: h.map((x, i) => x * f(i)), lows: l.map((x, i) => x * f(i)), closes: c.map((x, i) => x * f(i)), volumes: v.map((x, i) => x / fS[i]) }; };
   const changed = splits.length > 0 || shareEvents > 0; // 官方股數變動或配股：價位序列才需要換算
-  return { price: changed ? mk(false) : hist, total: changed || nDiv > 0 ? mk(true) : hist, splits, unexplained, dividendsApplied: nDiv, changed: changed || nDiv > 0 };
+  // stockDividends：已還原的配股（股票股利）事件，與 splits 一樣會改變可交易價位的換算單位
+  return { price: changed ? mk(false) : hist, total: changed || nDiv > 0 ? mk(true) : hist, splits, stockDividends, unexplained, dividendsApplied: nDiv, changed: changed || nDiv > 0 };
 }
 
 /** 從官方基金中文名稱解析槓桿／反向倍數（例：「單日正向2倍」「單日反向一倍」「單日正向兩倍」） */

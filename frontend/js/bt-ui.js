@@ -575,8 +575,8 @@ function diagHTML(dg, m, cfg) {
   if (dg.startDelayed) lines.push('起始日前的資料不足 ' + dg.lookback + ' 根（指標所需回看長度），' + dg.tradeFrom + ' 之前不交易，但這段仍計入績效期間。');
   else if (!dg.preBars) lines.push('前 ' + dg.warmup + ' 根 K 線用於指標暖機、不交易；可交易期間自 ' + (dg.tradeFrom || '—') + ' 起。');
   if (dg.priceLimit && dg.priceLimit.limit === null) lines.push('漲跌幅依據：' + dg.priceLimit.basis + (dg.priceLimit.known ? '。不設漲跌幅的商品無法用漲跌幅偵測未收錄的公司行動，只依官方公告還原。' : '。分類無法確認時，超過 10% 且查無公告的變動會停止回測，但不代表違反漲跌幅規則。'));
-  if (dg.shareChanges && dg.shareChanges.length) lines.push('⚠ 回測期間內有官方股數變動：' + dg.shareChanges.map(function(x) { return x.date + ' ' + x.type + '（' + (x.before && x.after ? '公告參考價 ' + x.before + ' → ' + x.after + '，' : '') + '換算比例 ' + x.ratio + '）'; }).join('、') +
-    '。變動前的價格與成交量已依公告換算成目前的股數基礎，每筆交易的報酬率不受影響；但變動前的「張數」是換算後的單位：依參考價換算，當時的 1 張約等於現在的 ' + dg.shareChanges.map(function(x) { return x.ratio; }).join('、') +
+  if (dg.shareChanges && dg.shareChanges.length) lines.push('⚠ 回測期間內有股數變動（分割、面額變更或配股）：' + dg.shareChanges.map(function(x) { return x.date + ' ' + x.type + '（' + (x.before && x.after ? '公告參考價 ' + x.before + ' → ' + x.after + '，' : '') + (x.stock ? '每股配股 ' + x.stock + ' 元，' : '') + '換算比例 ' + x.ratio + '）'; }).join('、') +
+    '。變動前的價格與成交量已依公告換算成目前的股數基礎，每筆交易的報酬率不受影響；但變動前的「張數」是換算後的單位：依公告換算，當時的 1 張約等於現在的 ' + dg.shareChanges.map(function(x) { return x.ratio; }).join('、') +
     ' 張，整張取捨與升降單位都和當時實際可交易的不同，所以部位大小、損益金額與權益曲線會和當時實際做得到的結果有差異。' + (dg.entriesBeforeShareChange ? '本次有 ' + dg.entriesBeforeShareChange + ' 筆進場發生在變動前，' : '') + '這段屬於研究模擬，不是當時實際成交的重現。');
   lines.push('進場訊號 ' + dg.entrySignals + ' 次、出場訊號 ' + dg.exitSignals + ' 次；實際完成 ' + m.tradeCount + ' 筆交易。');
   if (dg.rejected) lines.push('有 ' + dg.rejected + ' 次進場訊號未成交' + (dg.rejectedCash ? '，其中 ' + dg.rejectedCash + ' 次是現金不足以買進一張（各次所需含手續費金額介於 ' + Number(dg.minCashNeeded).toLocaleString() + '～' + Number(dg.maxCashNeeded).toLocaleString() + ' 元，依當次成交參考價而定）。本系統以整張交易，未模擬零股。' : '。'));

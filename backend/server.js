@@ -85,7 +85,9 @@ async function api(req, res, url, ip) {
     const limitInfo = priceLimit(C, cls, clsFail);
     if (raw.closes.length > 1) {
       const a = adjustPrices(raw, divEv, acts || [], limitOpts(limitInfo));
-      if (a.splits.length) { h = a.price; splitAdjusted = a.splits; } // 回測使用可交易價位：只還原股數變動，不還原現金股利
+      // 回測使用可交易價位：一律採用股數還原後的序列（官方分割、面額變更與配股）；純現金股利不改價位（a.price 即原始序列）。
+      // 舊版只在有官方分割時才換成還原價，配股的還原被丟棄，卻仍回報檢查完成。
+      h = a.price; splitAdjusted = a.splits.concat(a.stockDividends).sort((x, y) => (x.date < y.date ? -1 : x.date > y.date ? 1 : 0)); // 換算事件一併回傳，回測據此揭露
       // 只有在分割清單與股利資料都取得時，才能區分「無法解釋的跳動」與正常除息；否則回報未檢查，不冒然判定
       if (acts && divEv) unexplained = a.unexplained;
     }

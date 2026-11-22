@@ -990,7 +990,8 @@ var ExecutionEngine = (function() {
     // 期間內有官方股數變動（分割、反分割、面額變更）：變動前的價格已換算成目前股數基礎。
     // 每筆交易的報酬率不受影響；但變動前的「張數」是換算後的單位，不是當時實際可買的整張，部位大小、損益金額與權益曲線會不同。
     diag.shareChanges = (config.splitAdjusted || []).filter(function(x) { return x && x.date > diag.periodStart && x.date <= dates[n - 1]; })
-      .map(function(x) { return { date: x.date, type: x.type || '股數變動', ratio: +x.ratio, before: x.before, after: x.after }; });
+      .map(function(x) { return { date: x.date, type: x.type || '股數變動', ratio: +x.ratio, before: x.before, after: x.after, stock: x.stock }; })
+      .sort(function(a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
     if (diag.shareChanges.length) { var lastChg = diag.shareChanges[diag.shareChanges.length - 1].date;
       diag.entriesBeforeShareChange = trades.filter(function(t) { return t.type === 'entry' && t.date < lastChg; }).length; }
     return { equity, trades, finalPortfolio: pf, diag: diag };

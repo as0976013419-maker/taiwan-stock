@@ -601,3 +601,28 @@ test("行情總覽的「今日漲停價」與跳動偵測使用同一份官方�
   U._test_clear(); a = await analyzeFn(demo, "2330"); assert.ok(row(a).replace(/,/g, "").startsWith(`| 今日漲停價 | ${S2.limitUpPrice(a.quote.prevClose, false)}（距現價`), row(a));
   assert.strictEqual(S2.limitUpPrice(100, false), 110); assert.strictEqual(S2.limitUpPrice(50, true, 0.2), 60);
 });
+test("Codex 反例：/history 已知配股要回傳股數還原價並揭露換算事件；純現金股利不改可交易價位", async () => {
+  const { server } = require("../server"), U = require("../src/util"), keep = { h: demo.getHistory, s: demo.getSplitMap, d: demo.getDividends };
+  await new Promise((r) => server.listen(0, r)); const port = server.address().port;
+  const raw = flat(80, (i) => (i < 40 ? 110 : 100)), ev = raw.dates[40]; // 人工日 K（測試資料）：前 40 根 110、後 40 根 100
+  const get = async () => { U._test_clear(); return (await fetch(`http://localhost:${port}/history?code=2330&start=2000-01-01&end=2030-01-01`)).json(); };
+  try {
+    demo.getHistory = async (c) => Object.assign(JSON.parse(JSON.stringify(raw)), { code: c }); demo.getSplitMap = async () => new Map();
+    // 配股：每股 1 元（面額 10 元 → 10% 配股），事件日價格 100 正是 110 ÷ 1.1
+    demo.getDividends = async () => ({ events: [{ date: ev, cash: 0, stock: 1 }] });
+    let j = await get();
+    assert.ok(Math.abs(j.closes[0] - 100) < 1e-9 && Math.abs(j.opens[0] - 100) < 1e-9, "事件前價格要換算成配股後股數基準：" + j.closes[0]); assert.strictEqual(j.closes[40], 100);
+    assert.ok(Math.abs(j.volumes[0] - raw.volumes[0] * 1.1) < 1e-6, "成交量同步換算");
+    assert.deepStrictEqual(j.unexplained, []); assert.strictEqual(j.checkNote, null);
+    assert.deepStrictEqual(j.splitAdjusted.map((x) => [x.date, x.type, x.stock, x.ratio]), [[ev, "配股", 1, 1.1]]);
+    // 回測：與回測頁相同的設定方式，診斷要揭露配股的換算單位
+    const B = vmLoad(), d = { code: "2330" }; for (const f of ["dates", "opens", "highs", "lows", "closes", "volumes"]) d[f] = j[f];
+    const r = B.run(d, btCfg({ code: "2330", tradeStart: raw.dates[30], splitAdjusted: j.splitAdjusted, unexplained: j.unexplained.map((x) => x.date), execType: "close", longEntry: [{ id: "price_above_ma", params: { period: 20 } }], longExit: [] }));
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(r.diag.shareChanges)).map((x) => [x.date, x.type, x.ratio, x.stock]), [[ev, "配股", 1.1, 1]]);
+    // 對照：純現金股利 10 元 → 可交易價位不變（逐值等於原始資料），不列入股數換算
+    demo.getDividends = async () => ({ events: [{ date: ev, cash: 10, stock: 0 }] });
+    j = await get();
+    for (const f of ["opens", "highs", "lows", "closes", "volumes"]) assert.deepStrictEqual(j[f], raw[f], f);
+    assert.deepStrictEqual(j.splitAdjusted, []); assert.deepStrictEqual(j.unexplained, []); assert.strictEqual(j.checkNote, null);
+  } finally { Object.assign(demo, { getHistory: keep.h, getSplitMap: keep.s, getDividends: keep.d }); U._test_clear(); await new Promise((r) => server.close(r)); }
+});
