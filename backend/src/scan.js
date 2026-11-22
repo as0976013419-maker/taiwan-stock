@@ -44,15 +44,28 @@ async function runScan(src, { mode = "volume", limit = 20, universe = "custom", 
   if (lite && mode === "volume") { // 首頁熱門股列只需要代號與名稱：不評分、不消耗個股資料額度
     const snap = await src.getMarketSnapshot();
     const top = [...snap.stocks.values()].filter((r) => r.price > 0 && r.volume > 0 && !r.isETF).sort((a, b) => b.volume - a.volume).slice(0, limit);
-    return { mode, lite: true, stocks: top.map(base), cached: false, _v: S.VERSION, demo: !!src.demo };
+    const ds = top.map((r) => r.date).filter(Boolean).sort();
+    return { mode, lite: true, stocks: top.map(base), cached: false, _v: S.VERSION, demo: !!src.demo, asOf: ds[ds.length - 1] || null };
   }
   const key = `scan:${mode}:${limit}:${universe}`;
   let fresh = false;
   const result = await cached(key, 180000, async () => { fresh = true; return compute(src, mode, limit, universe); });
-  return Object.assign({}, result, { cached: !fresh, _v: S.VERSION, demo: !!src.demo });
+  const BASIS = {
+    volume: "依成交量（張）由大到小；排除 ETF", change: "依漲跌幅由大到小；排除 ETF 與成交量低於 300 張者", drop: "依漲跌幅由小到大；排除 ETF 與成交量低於 300 張者",
+    momentum: "先以當日快照粗篩，再以近 200 日 K 線計算動能分數排序；排除 ETF", sector: "族群熱度＝族群平均漲跌、上漲家數比與漲停家數的加權；僅含成交值前 800 檔、5 檔以上的族群",
+    limitup: "漲幅大於 3% 且在成交值前 800 檔者，依鎖漲停觀察分數排序", disposition: "證交所公告的處置股與注意股，依處置期間相對強弱排序（不是買進評分）" };
+  return Object.assign({}, result, { cached: !fresh, _v: S.VERSION, demo: !!src.demo, basis: BASIS[mode] || "",
+    scoreNote: "掃描評分只使用收盤快照與近 200 日 K 線，沒有法人與融資的多日序列，與個股頁的評分資料範圍不同，兩者可能不一致。" });
 }
 
 async function compute(src, mode, limit, universe) {
+  const r0 = await compute0(src, mode, limit, universe), snap = await src.getMarketSnapshot();
+  // 資料日期：快照中最常見的交易日（上市與上櫃可能因更新時間不同而不一致，兩者都列出）
+  const cnt = new Map(); for (const r of snap.stocks.values()) if (r.date) cnt.set(r.date, (cnt.get(r.date) || 0) + 1);
+  const dates = [...cnt.entries()].sort((a, b) => b[1] - a[1]).map((x) => x[0]);
+  return Object.assign(r0, { asOf: dates[0] || null, asOfOther: dates.slice(1, 3), generatedAt: new Date().toISOString() });
+}
+async function compute0(src, mode, limit, universe) {
   const snap = await src.getMarketSnapshot();
   const all = [...snap.stocks.values()].filter((r) => r.price > 0 && r.volume > 0);
   const sectors = sectorStats(all);

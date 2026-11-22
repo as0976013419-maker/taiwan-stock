@@ -233,3 +233,26 @@ body{background:var(--bg);color:var(--text1);font-family:"Noto Sans TC",sans-ser
 @media(max-width:900px){.kpi-row{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:600px){.hz-row{grid-template-columns:1fr}.glossary dl{grid-template-columns:1fr;gap:2px}.glossary dd{margin-bottom:8px}}
 @media print{.glossary{display:none !important}.hz[open] .hz-body,.hz .hz-body{display:block}}
+
+/* ── v5.3：掃描標頭、避免浮動按鈕遮擋、窄螢幕表格首欄固定 ─────── */
+.scan-meta{font-size:11px;color:var(--text2);line-height:1.7;margin-bottom:8px;padding:6px 10px;background:var(--bg3);border-radius:4px}
+.scan-meta b{color:var(--text1)}
+.main{padding-bottom:84px}
+.site-footer{padding-bottom:84px}
+.ai-text .data-table td:first-child,.ai-text .data-table th:first-child{position:sticky;left:0;background:var(--bg2);z-index:1}
+@media(max-width:600px){.pdf-btn-float{bottom:12px;right:12px}.pdf-btn-float button{padding:8px 14px;font-size:11px}}
+/* ── 列印／PDF：一律使用淺色變數（螢幕若是深色主題，評分卡、關鍵數字列、週期面板也不會印成深底）；
+      首欄固定只在螢幕上有意義，列印時取消，避免深色底蓋住表格標籤；分頁標題不得與內容分離 ── */
+@media print{
+  :root,[data-theme="dark"],[data-theme="light"]{--bg:#fff;--bg2:#fff;--bg3:#f6f7f9;--bg4:#eceff3;--border:#d9dde3;--border2:#c5cbd3;--text1:#111827;--text2:#374151;--text3:#6b7280;--accent:#1d4ed8;--accent2:#2563eb}
+  .ai-text .data-table td:first-child,.ai-text .data-table th:first-child{position:static;background:transparent}
+  .ai-text{overflow:visible}
+  .tab-pane>.card:first-child,.tab-pane>.ai-block:first-child{break-before:auto !important;page-break-before:auto !important}
+  .pdf-tab-title{break-before:page;page-break-before:always;break-after:avoid;page-break-after:avoid}
+  #tp0 .pdf-tab-title{break-before:auto;page-break-before:auto}
+  .hz-body{display:block}
+  .main,.site-footer{padding-bottom:0}
+}
+
+.pdf-short{display:none}
+@media(max-width:600px){.pdf-long{display:none}.pdf-short{display:inline}.pdf-btn-float button{padding:6px 10px;font-size:11px;opacity:.9}}

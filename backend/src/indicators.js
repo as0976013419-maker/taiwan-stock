@@ -80,6 +80,7 @@ function snapshot(hist) {
   for (let k = Math.max(1, n - 10); k < n; k++) { if (c[k] > c[k - 1]) { upV += v[k]; upN++; } else if (c[k] < c[k - 1]) { dnV += v[k]; dnN++; } }
   const hi20prev = maxOf(h, i - 20, i - 1), hi60 = maxOf(h, i - 59, i), lo60 = minOf(l, i - 59, i);
   const hi240 = maxOf(h, i - 239, i), lo240 = minOf(l, i - 239, i);
+  const hi250 = maxOf(h, i - 249, i), lo250 = minOf(l, i - 249, i); // 52 週＝250 個交易日，與多週期績效、趨勢模板同一口徑
   return {
     bars: n, close: c[i], prevClose: c[i - 1],
     ma5: at(ma5), ma10: at(ma10), ma20: at(ma20), ma60: at(ma60), ma120: at(ma120), ma240: at(ma240),
@@ -90,7 +91,8 @@ function snapshot(hist) {
     upVolAvg: upN ? upV / upN : null, dnVolAvg: dnN ? dnV / dnN : null,
     hi20prev, lo20: minOf(l, i - 19, i), hi60, lo60, hi240, lo240,
     pos240: hi240 > lo240 ? (c[i] - lo240) / (hi240 - lo240) * 100 : null, // 一年區間位階 0~100
-    ret5: ret(5), ret20: ret(20), ret60: ret(60), ret240: ret(240),
+    hi250, lo250, pos250: hi250 > lo250 ? (c[i] - lo250) / (hi250 - lo250) * 100 : null, span250: Math.min(250, n),
+    ret5: ret(5), ret20: ret(20), ret60: ret(60), ret240: ret(240), ret250: ret(250),
     maCross: cross(ma5, ma20), kdCross: cross(KD.K, KD.D), macdCross: cross(M.dif, M.dea),
     maBull: at(ma5) !== null && at(ma20) !== null && at(ma60) !== null && at(ma5) > at(ma20) && at(ma20) > at(ma60),
     maBear: at(ma5) !== null && at(ma20) !== null && at(ma60) !== null && at(ma5) < at(ma20) && at(ma20) < at(ma60),

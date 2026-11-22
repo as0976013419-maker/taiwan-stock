@@ -3,7 +3,7 @@
 // 所有數字都直接來自後端計算結果；沒有資料的項目顯示「—」，不估計、不補值。
 // 多空方向（stance）與標籤（tags）以結構化欄位回傳，前端不再從文字裡猜。
 const { pctStr } = require("./util");
-const { limitUpPrice } = require("./scoring");
+const { limitUpPrice, roundTick } = require("./scoring");
 const Q = require("./quant");
 
 const ok = (v) => v !== null && v !== undefined && isFinite(v);
@@ -12,7 +12,21 @@ const sgn = (v, d = 0) => (ok(v) ? (v > 0 ? "+" : "") + f(v, d) : "—");
 const pc = (v, d = 2) => (ok(v) ? (v > 0 ? "+" : "") + Number(v).toFixed(d) + "%" : "—");
 const p0 = (v, d = 1) => (ok(v) ? Number(v).toFixed(d) + "%" : "—");
 const yi = (v) => (ok(v) ? f(v / 1e8, Math.abs(v) >= 1e10 ? 0 : 1) + " 億" : "—"); // 元 → 億元
-const mark = (b) => (b === null || b === undefined ? "—" : b ? "✔ 符合" : "✘ 未符合");
+const mark = (b) => (b === "na" ? "不適用" : b === null || b === undefined ? "資料不足" : b ? "✔ 符合" : "✘ 未符合");
+/** 多個子條件的「且」：任一未符合→未符合；全部符合→符合；其餘依是否有資料不足決定 */
+const andState = (...xs) => (xs.some((x) => x === false) ? false : xs.every((x) => x === true) ? true : xs.some((x) => x === null || x === undefined) ? null : "na");
+/**
+ * 多空方向以「類別」計票：同一類的多個價格指標高度相關，各算一票會讓價格面壓過基本面與籌碼。
+ * 每個類別內部先多數決成一票；少數方也有 2 個以上類別時視為分歧，不硬湊單一方向。
+ * @param groups [[類別名, [[+1|-1, 說明], ...]], ...]
+ */
+function voteCategories(groups) {
+  const cats = [];
+  for (const [name, items] of groups) { const it = items.filter(Boolean); if (!it.length) continue; const t = it.reduce((a, x) => a + x[0], 0); cats.push({ name, sign: t > 0 ? 1 : t < 0 ? -1 : 0, items: it }); }
+  const nb = cats.filter((c) => c.sign > 0).length, ns = cats.filter((c) => c.sign < 0).length, conflict = nb >= 2 && ns >= 2;
+  const stance = conflict ? "中性" : nb - ns >= 2 ? "偏多" : ns - nb >= 2 ? "偏空" : "中性";
+  return { stance, bull: nb, bear: ns, neutral: cats.length - nb - ns, total: cats.length, conflict, categories: cats };
+}
 const rankTxt = (p) => (ok(p) ? `高於 ${p}% 的股票` : "—");
 
 function buildReport(a) {
@@ -25,23 +39,23 @@ function buildReport(a) {
   const sum = (arr, k, n) => arr.slice(-n).reduce((s, r) => s + r[k], 0);
   const streak = (k, dir) => { let n = 0; for (let j = chip.length - 1; j >= 0 && (dir > 0 ? chip[j][k] > 0 : chip[j][k] < 0); j--) n++; return n; };
 
-  // ── 多空條件彙整（裁定、策略、標籤共用）──
-  const bull = [], bear = [];
-  if (has) {
-    (i.close > i.ma20 ? bull : bear).push(i.close > i.ma20 ? "股價站上月線" : "股價跌破月線");
-    if (ok(i.ma60)) (i.close > i.ma60 ? bull : bear).push(i.close > i.ma60 ? "站上季線" : "位於季線之下");
-    if (i.maBull) bull.push("均線多頭排列"); if (i.maBear) bear.push("均線空頭排列");
-    if (ok(i.macdHist)) (i.macdHist > 0 ? bull : bear).push(i.macdHist > 0 ? "MACD 柱狀體為正" : "MACD 柱狀體為負");
-    if (ok(i.k)) (i.k > i.d ? bull : bear).push(i.k > i.d ? "K 值在 D 值之上" : "K 值在 D 值之下");
-  }
-  if (tr) { if (tr.passed >= 6) bull.push(`趨勢模板符合 ${tr.passed}/${tr.total} 項`); else if (tr.passed <= 2) bear.push(`趨勢模板僅符合 ${tr.passed}/${tr.total} 項`); }
-  if (ok(rsOf(60).excess)) (rsOf(60).excess > 0 ? bull : bear).push(`近三個月${rsOf(60).excess > 0 ? "強於" : "弱於"}大盤`);
+  // ── 趨勢模板狀態：關鍵條件（第 1～3 項）未過，即使總數高也不算趨勢成立 ──
+  const trendState = !tr ? null : tr.total === 8 && tr.passed === 8 ? "full" : tr.checks[0].pass && tr.checks[1].pass && tr.checks[2].pass && tr.passed >= 6 ? "mostly" : "no";
+  const trendMiss = tr ? tr.checks.map((c, k) => [k + 1, c]).filter((x) => x[1].pass !== true).map((x) => `第 ${x[0]} 項（${x[1].name}${x[1].pass === null ? "，資料不足" : ""}）`) : [];
+  const trendWord = { full: "完整符合", mostly: "大致成立但不完整", no: "未成立" };
   const c5 = chip && chip.length ? sum(chip, "total", 5) : null, c20 = chip && chip.length ? sum(chip, "total", 20) : null;
-  if (c5 !== null) (c5 > 0 ? bull : bear).push("法人近五日合計" + (c5 > 0 ? "買超" : "賣超"));
-  if (ok(fu.revYoY)) (fu.revYoY >= 0 ? bull : bear).push("月營收年" + (fu.revYoY >= 0 ? "增" : "減"));
-  if (ok(fu.epsYoY)) (fu.epsYoY >= 0 ? bull : bear).push("單季 EPS 年" + (fu.epsYoY >= 0 ? "增" : "減"));
-  if (mkt) (mkt.above200 ? bull : bear).push("大盤位於 200 日均線" + (mkt.above200 ? "之上" : "之下"));
-  const net = bull.length - bear.length, stance = net >= 3 ? "偏多" : net <= -3 ? "偏空" : "中性";
+  const V = (cond, yes, no) => (cond === null || cond === undefined ? null : cond ? [1, yes] : [-1, no]);
+  const vote = voteCategories([
+    ["價格趨勢", has ? [V(i.close > i.ma20, "站上月線", "跌破月線"), ok(i.ma60) ? V(i.close > i.ma60, "站上季線", "位於季線之下") : null, i.maBull ? [1, "均線多頭排列"] : i.maBear ? [-1, "均線空頭排列"] : null,
+      trendState === "full" || trendState === "mostly" ? [1, `趨勢模板${trendWord[trendState]}`] : trendState === "no" && tr.passed <= 3 ? [-1, `趨勢模板僅符合 ${tr.passed}/${tr.total}`] : null] : []],
+    ["動能", has ? [ok(i.macdHist) ? V(i.macdHist > 0, "MACD 柱狀體為正", "MACD 柱狀體為負") : null, ok(i.k) ? V(i.k > i.d, "K 值在 D 值之上", "K 值在 D 值之下") : null] : []],
+    ["相對強弱", [ok(rsOf(60).excess) ? V(rsOf(60).excess > 0, "近 3 個月強於大盤", "近 3 個月弱於大盤") : null]],
+    ["籌碼", [c5 !== null ? V(c5 > 0, "法人近 5 日買超", "法人近 5 日賣超") : null]],
+    ["基本面", [ok(fu.revYoY) ? V(fu.revYoY >= 0, "月營收年增", "月營收年減") : null, ok(fu.epsYoY) ? V(fu.epsYoY >= 0, "單季 EPS 年增", "單季 EPS 年減") : ok(fu.epsQ) && fu.epsQ < 0 ? [-1, "單季虧損"] : null]],
+    ["大盤", [mkt ? V(mkt.above200, "大盤在 200 日均線之上", "大盤在 200 日均線之下") : null]],
+  ]);
+  const bull = [], bear = []; for (const c of vote.categories) for (const x of c.items) (x[0] > 0 ? bull : bear).push(x[1]);
+  const stance = vote.stance;
 
   // ── 依時間尺度拆開的判斷：短線轉弱、中線整理、長線多頭可以同時成立，不該混成一個訊號 ──
   const horizons = [], T = (cond, yes, no) => (cond === null || cond === undefined ? null : cond ? [1, yes] : [-1, no]);
@@ -84,7 +98,9 @@ function buildReport(a) {
 
   // 支撐／壓力候選
   const sup = has ? [["MA20", i.ma20], ["MA60", i.ma60], ["近 20 日低點", i.lo20], ["布林下軌", i.bollLo], ["MA240", i.ma240], ["近 60 日低點", i.lo60]].filter((x) => ok(x[1]) && x[1] < i.close).sort((x, y) => y[1] - x[1]) : [];
-  const res = has ? [["前 20 日高點", i.hi20prev], ["MA20", i.ma20], ["MA60", i.ma60], ["布林上軌", i.bollUp], ["近 60 日高點", i.hi60], ["MA240", i.ma240], ["近一年高點", i.hi240]].filter((x) => ok(x[1]) && x[1] > i.close).sort((x, y) => x[1] - y[1]) : [];
+  const res = has ? [["前 20 日高點", i.hi20prev], ["MA20", i.ma20], ["MA60", i.ma60], ["布林上軌", i.bollUp], ["近 60 日高點", i.hi60], ["MA240", i.ma240], ["52 週高點", i.hi250]].filter((x) => ok(x[1]) && x[1] > i.close).sort((x, y) => x[1] - y[1]) : [];
+  const merge = (arr) => { const out = []; for (const x of arr) { const y = out[out.length - 1]; if (y && Math.abs(x[1] / y[1] - 1) < 0.003) y[0] += "／" + x[0]; else out.push([x[0], x[1]]); } return out; };
+  sup.splice(0, sup.length, ...merge(sup)); res.splice(0, res.length, ...merge(res));
   const s1 = sup[0], r1 = res[0];
 
   // ════════════ 行情 ════════════
@@ -97,13 +113,14 @@ function buildReport(a) {
     `| 昨收 | ${f(q.prevClose)} |`,
     lu ? `| 今日漲停價 | ${f(lu)}（距現價 ${pc((lu / P - 1) * 100, 1)}） |` : "",
     `| 成交量 | ${f(q.volume, 0)} 張${q.realtime ? "（盤中累計）" : has && i.vma20 ? "（20 日均量 " + f(i.vma20 / 1000, 0) + " 張的 " + f(i.volRatio, 2) + " 倍）" : ""} |`,
-    q.value ? `| 成交金額 | ${yi(q.value)} |` : "",
+    q.value ? `| 成交金額 | ${yi(q.value)}（${q.valueSource || ""}，${q.date || ""}） |` : `| 成交金額 | —（${q.date || "當日"} 的官方成交金額尚未取得；不以其他日期的數字代替） |`,
     fu.marketCap ? `| 市值 | ${yi(fu.marketCap)} |` : "",
-    has ? `| 52 週區間 | ${f(i.lo240)} ~ ${f(i.hi240)}（現價位於區間 ${f(i.pos240, 0)}%） |` : "",
+    has ? `| 52 週區間 | ${f(i.lo250)} ~ ${f(i.hi250)}（近 ${i.span250} 個交易日；現價位於區間 ${f(i.pos250, 0)}%） |` : "",
     `| 綜合評分 | ${sc.score} / 100（${sc.grade}） |`,
     mkt ? `【大盤】加權指數 ${f(mkt.close, 0)}（${mkt.date}），位於 50 日均線${mkt.above50 ? "之上" : "之下"}、200 日均線${mkt.above200 ? "之上" : "之下"}；近 20 日 ${pc(mkt.ret20)}、近 60 日 ${pc(mkt.ret60)}。` : "",
     `資料時間：${q.time || q.date || "最近交易日"}${q.realtime ? "（盤中即時；成交量為當日累計，量能相關判斷改用前一完整交易日 " + (has && i.volAsOf ? i.volAsOf : "") + "）" : "（收盤）"}`,
-    a.asOf ? `【各項資料日期】K 線 ${a.asOf.kline || "—"}｜法人 ${a.asOf.chip || "—"}｜融資券 ${a.asOf.margin || "—"}｜外資持股 ${a.asOf.holding || "—"}｜月營收 ${a.asOf.revenue || "—"}｜季財報 ${a.asOf.financials || "—"}｜大盤 ${a.asOf.index || "—"}｜族群與官方估值 ${a.asOf.snapshot || "—"}` : "",
+    a.asOf ? `【各項資料日期與來源】報價 ${a.asOf.quote || "—"}（${q.source || "—"}）｜K 線 ${a.asOf.kline || "—"}（FinMind）｜法人 ${a.asOf.chip || "—"}｜融資券 ${a.asOf.margin || "—"}｜外資持股 ${a.asOf.holding || "—"}（以上 FinMind）｜月營收 ${a.asOf.revenue || "—"}｜季財報 ${a.asOf.financials || "—"}（FinMind，源自公開資訊觀測站）｜大盤 ${a.asOf.index || "—"}（加權指數）｜族群與官方估值 ${a.asOf.snapshot || "—"}（證交所／櫃買中心 OpenAPI）` : "",
+    q.staleSources && q.staleSources.length ? `【資料落後】${q.staleSources.map((x) => x.source + " 仍停在 " + x.date).join("、")}；本頁報價採用 ${q.date} 的資料，落後來源的欄位（如成交金額、族群統計、官方估值）已分別標示日期或換算，不與當日數字混用。` : "",
     a.adjust && a.adjust.splits.length ? `【價格還原】依官方公告還原股數變動：${a.adjust.splits.map((x) => x.date + " " + x.type + "（參考價 " + f(x.before) + " → " + f(x.after) + "，" + x.ratio + " 倍）").join("、")}。該日之前的歷史價格與成交量已換算成現在的股數基準；之後的價格就是實際成交價。` : "",
     a.adjust && a.adjust.unexplained.length ? `【未還原的異常跳動】${a.adjust.unexplained.slice(0, 5).map((x) => x.date + "（" + pc(x.movePct, 1) + "）").join("、")}：單日變動超過 10% 漲跌幅限制，但查無分割、面額變更或減資公告，可能是無漲跌幅限制的商品、上市初期或恢復交易。系統未做任何還原，相關期間的報酬與波動統計請保守解讀。` : "",
     a.adjust && !a.adjust.dividendsAvailable ? "【注意】股利資料暫時無法取得，本次的報酬、波動與歷史訊號統計未還原除息，除息日會被算成下跌。" : "",
@@ -113,8 +130,10 @@ function buildReport(a) {
   if (rs) {
     const beat = rs.filter((r) => ok(r.excess) && r.excess > 0).length, cnt = rs.filter((r) => ok(r.excess)).length;
     sec("多週期績效", [
-      "| 期間 | 個股（不含息） | 個股（含息） | 加權指數（不含息） | 超額報酬 |", "|---|---|---|---|---|",
-      ...rs.map((r) => `| ${r.label} | ${pc(r.ret)} | ${pc(r.tr)} | ${pc(r.idx)} | ${pc(r.excess)} |`),
+      "| 期間 | 起訖（交易日數） | 個股（不含息） | 個股（含息） | 加權指數（不含息） | 超額報酬 |", "|---|---|---|---|---|---|",
+      ...rs.map((r) => `| ${r.label} | ${r.from ? r.from + "～" + r.to + "（" + r.days + "）" : "—"} | ${r.note && !ok(r.ret) ? "無法計算" : pc(r.ret)} | ${pc(r.tr)} | ${pc(r.idx)} | ${pc(r.excess)} |`),
+      ...rs.filter((r) => r.note).map((r) => `【${r.label}無法計算】${r.note}。`),
+      "「1 年」固定為 250 個交易日，全站的一年報酬、52 週區間與趨勢模板都使用同一口徑。",
       cnt ? `【相對強弱】${cnt} 個期間中有 ${beat} 個優於大盤。${beat >= cnt - 1 ? "各週期一致領先，屬於市場上的相對強勢股。" : beat <= 1 ? "各週期多數落後，屬於相對弱勢股。" : "短中長週期的強弱不一致，需分辨是轉強初期還是轉弱初期。"}` : "大盤資料暫時無法取得，僅顯示個股報酬。",
       "【口徑】超額報酬＝個股不含息報酬 − 加權指數報酬。加權指數本身不含股利，所以用不含息對不含息比較才公平；「含息」欄是把現金股利加回後的實際報酬。" + (a.adjust && a.adjust.dividendsApplied ? `期間內已還原 ${a.adjust.dividendsApplied} 次現金股利。` : ""),
       mkt && q.date && mkt.date < q.date ? `指數資料更新至 ${mkt.date}，比個股晚一個交易日；超額報酬為近似值。` : "",
@@ -131,10 +150,10 @@ function buildReport(a) {
         pv ? `【隔日樞紐點】軸心 ${f(pv)}；壓力 R1 ${f(2 * pv - lastBar.low)}、R2 ${f(pv + lastBar.high - lastBar.low)}；支撐 S1 ${f(2 * pv - lastBar.high)}、S2 ${f(pv - (lastBar.high - lastBar.low))}。（由最近一根日 K 的高低收計算，短線當沖與隔日沖常用）` : "",
         risk && risk.atr14 ? `【波動參考】ATR(14) 為 ${f(risk.atr14)} 元（佔股價 ${p0(risk.atrPct, 2)}），代表近期平均每日真實波幅；支撐壓力若彼此相距不到 1 倍 ATR，實務上應視為同一區。` : ""]));
     sec("位階分析", [
-      ok(i.pos240) ? `現價位於近一年高低區間（${f(i.lo240)} ~ ${f(i.hi240)}）的 ${f(i.pos240, 0)}% 位置：${i.pos240 >= 80 ? "高位階，追價的風險報酬比較差，但強勢股常在高位階續強。" : i.pos240 <= 20 ? "低位階；低位階不等於便宜，需確認基本面沒有惡化。" : "中段位階。"}` : "",
+      ok(i.pos250) ? `現價位於 52 週高低區間（${f(i.lo250)} ~ ${f(i.hi250)}）的 ${f(i.pos250, 0)}% 位置：${i.pos250 >= 80 ? "高位階，追價的風險報酬比較差，但強勢股常在高位階續強。" : i.pos250 <= 20 ? "低位階；低位階不等於便宜，需確認基本面沒有惡化。" : "中段位階。"}` : "",
       "| 乖離對象 | 均線價 | 乖離率 |", "|---|---|---|",
       `| 月線 MA20 | ${f(i.ma20)} | ${pc((i.close / i.ma20 - 1) * 100)} |`, ok(i.ma60) ? `| 季線 MA60 | ${f(i.ma60)} | ${pc((i.close / i.ma60 - 1) * 100)} |` : "", ok(i.ma240) ? `| 年線 MA240 | ${f(i.ma240)} | ${pc((i.close / i.ma240 - 1) * 100)} |` : "",
-      risk ? `距近一年收盤高點回落 ${p0(Math.abs(risk.curDD))}；近一年最大回撤 ${p0(Math.abs(risk.maxDD))}。` : "",
+      risk ? `距近 250 個交易日收盤高點回落 ${p0(Math.abs(risk.curDD))}；近 250 個交易日最大回撤 ${p0(Math.abs(risk.maxDD))}。` : "",
       fu.own ? `估值位階：目前本益比 ${f(fu.pe, 1)} 倍，位於自身近五年分布的第 ${fu.own.pePct} 百分位（中位數 ${f(fu.own.peMed, 1)} 倍）。` : "",
       ok(i.ma60) && Math.abs(i.close / i.ma60 - 1) > 0.2 ? "與季線乖離超過 20%，統計上屬於偏離均值較遠的狀態，回歸均線的壓力較大。" : "",
     ]);
@@ -165,21 +184,21 @@ function buildReport(a) {
       `趨勢模板符合 ${tr.passed} / ${tr.total} 項；階段判定：${tr.stageName}（150 日均線近一個月變動 ${pc(tr.slope150)}）。`,
       "| # | 條件 | 現況 | 結果 |", "|---|---|---|---|",
       ...tr.checks.map((c, k) => `| ${k + 1} | ${c.name} | ${c.detail} | ${mark(c.pass)} |`),
-      tr.passed >= 7 ? "【解讀】結構完整的上升趨勢：均線由短到長依序排列且向上，股價接近高點。這是趨勢交易者只做多的區域。" : tr.passed >= 5 ? "【解讀】趨勢條件大致成立但不完整，常見於趨勢剛形成或開始轉弱時，需看未符合的是哪幾項。" : tr.passed >= 3 ? "【解讀】趨勢條件多數未成立，屬於整理或轉折階段，順勢交易的勝率優勢不明顯。" : "【解讀】幾乎不符合上升趨勢的任何條件。趨勢交易的原則是不在這個階段做多。",
+      trendState === "full" ? "【解讀】八項全部符合：均線由短到長依序排列且向上、股價接近高點，是該方法定義的上升趨勢。" : trendState === "mostly" ? `【解讀】關鍵條件（第 1～3 項）成立、共符合 ${tr.passed}/${tr.total} 項，但未完整符合；未符合：${trendMiss.join("、")}。` : tr.checks.slice(0, 3).some((c) => c.pass === false) ? `【解讀】關鍵條件未成立（${tr.checks.slice(0, 3).map((c, k) => [k + 1, c]).filter((x) => x[1].pass === false).map((x) => "第 " + x[0] + " 項").join("、")}），即使其他項目符合，也不屬於該方法定義的上升趨勢。` : `【解讀】符合 ${tr.passed}/${tr.total} 項，條件不足。`,
       "【階段分析】第一階段打底、第二階段上升、第三階段做頭、第四階段下降。趨勢交易只在第二階段持有，第四階段避開。",
-      "說明：此檢核表是把公開出版的趨勢交易方法（趨勢模板與四階段分析）的條件寫成程式逐項比對，均線採 50／150／200 日。",
+      "說明：此檢核表是把公開出版的趨勢交易方法（趨勢模板與四階段分析）的條件寫成程式逐項比對，均線採 50／150／200 日。第 8 項原方法使用 RS 評等（全市場相對強度排名 ≥ 70），本站以相對加權指數的超額報酬替代；四階段原方法以 30 週均線判定，本站以 150 日均線近似。",
     ] : ["歷史資料不足 220 個交易日，無法進行趨勢模板檢核。"]);
 
     sec("長線趨勢分析", [
       ok(i.ma120) ? `半年線（MA120）${f(i.ma120)}、年線（MA240）${f(i.ma240)}。${ok(i.ma240) ? (i.ma60 > i.ma120 && i.ma120 > i.ma240 ? "季線 > 半年線 > 年線，長期均線呈上升結構。" : i.ma60 < i.ma120 && i.ma120 < i.ma240 ? "季線 < 半年線 < 年線，長期均線呈下降結構。" : "長期均線互相交錯，屬於大區間整理。") : ""}` : "資料長度不足以判斷半年線以上的趨勢。",
       tr ? `200 日均線 ${f(tr.m200)}，近一個月${tr.checks[2].pass ? "上升" : "下降或走平"}；${tr.stageName}。` : "",
-      `近一年報酬 ${pc(i.ret240)}${ok(rsOf(250).excess) ? "，相對大盤 " + pc(rsOf(250).excess) : ""}；一年區間 ${f(i.lo240)} ~ ${f(i.hi240)}。`,
+      `近 250 個交易日報酬 ${ok(rsOf(250).ret) ? pc(rsOf(250).ret) + "（" + rsOf(250).from + "～" + rsOf(250).to + "）" : "無法計算"}${ok(rsOf(250).excess) ? "，相對大盤 " + pc(rsOf(250).excess) : ""}；52 週區間 ${f(i.lo250)} ~ ${f(i.hi250)}。`,
       ok(fac.mom12_1) ? `12-1 動能（過去 12 個月扣除最近 1 個月）為 ${pc(fac.mom12_1)}：這是學術上最常用的中長期動能定義，為正代表過去一年的贏家。` : "",
     ]);
 
     const hiBeta = risk && ok(risk.beta) ? (risk.beta >= 1.3 ? "高 Beta（放大大盤波動）" : risk.beta <= 0.7 ? "低 Beta（防禦型）" : "Beta 接近大盤") : null;
     sec("市場風格判定", [
-      `技術結構：${i.maBull && i.ret20 > 5 ? "趨勢動能型（順勢）" : i.maBear ? "弱勢整理型" : ok(i.pos240) && i.pos240 < 30 ? "低位階整理型" : "區間震盪型"}。`,
+      `技術結構：${i.maBull && i.ret20 > 5 ? "趨勢動能型（順勢）" : i.maBear ? "弱勢整理型" : ok(i.pos250) && i.pos250 < 30 ? "低位階整理型" : "區間震盪型"}。`,
       etf ? "屬性：ETF。" : `估值屬性：${fu.yield >= 4 && fu.pe > 0 && fu.pe <= 15 ? "偏價值／高殖利率" : fu.pe > 25 ? "偏成長（市場給予較高本益比）" : "中性"}。`,
       risk ? `波動屬性：年化波動 ${p0(risk.vol60)}（近 60 日）${hiBeta ? "，" + hiBeta + "（Beta " + f(risk.beta) + "、與大盤相關係數 " + f(risk.corr) + "）" : ""}。` : "",
       mkt ? `大盤環境：指數${mkt.above50 && mkt.above200 ? "位於 50 日與 200 日均線之上，屬於多頭環境，順勢做多的勝率較高" : !mkt.above50 && !mkt.above200 ? "位於 50 日與 200 日均線之下，屬於空頭環境，個股訊號的失敗率會上升" : "介於 50 日與 200 日均線之間，方向不明"}。` : "",
@@ -187,18 +206,20 @@ function buildReport(a) {
     ]);
 
     if (ev) {
-      const act = ev.events.filter((e) => e.active && e.count > 0), cell = (h) => (h && h.n ? `${h.win}% / ${pc(h.mean)}` : "—"), b = ev.baseline;
-      const G = { insufficient: "樣本不足", none: "與基準無法區分", weak: "弱（未校正）", strong: "顯著" };
+      const act = ev.events.filter((e) => e.active && e.count > 0), b = ev.baseline;
+      const cell = (h) => (h && h.n ? `${h.win}% / ${pc(h.mean)}（n=${h.n}）` : "—");
+      const G = { insufficient: "樣本不足", none: "與基準無法區分", weak: "弱（未校正）", strong: "達校正後門檻" };
       const strong = ev.events.filter((e) => e.h[2].grade === "strong").length, weak = ev.events.filter((e) => e.h[2].grade === "weak").length;
+      const ST = (e) => (e.stateNow === null ? "單日事件" : e.stateNow ? "條件目前仍成立" : "條件目前已不成立");
       sec("歷史訊號統計", [
-        `以這檔股票自己過去 ${ev.years} 年（${ev.bars} 個交易日）的還原權息日 K 回算。進場價＝訊號出現的隔日開盤價，持有 5／10／20 個交易日後以收盤價出場。表格內容為「上漲機率 / 平均報酬」，未扣交易成本。`,
-        "| 訊號 | 次數（獨立） | 5 日 | 10 日 | 20 日 | 20 日超額 | 證據強度 | 最近一次 |", "|---|---|---|---|---|---|---|---|",
-        `| 基準（任意一天買進） | ${b[0].n} | ${cell(b[0])} | ${cell(b[1])} | ${cell(b[2])} | — | — |  |`,
-        ...ev.events.filter((e) => e.count > 0).map((e) => `| ${e.active ? "★ " : ""}${e.name} | ${e.count}（${e.h[2].indep || 0}） | ${cell(e.h[0])} | ${cell(e.h[1])} | ${cell(e.h[2])} | ${ok(e.h[2].excess) ? pc(e.h[2].excess) : "—"} | ${G[e.h[2].grade]} | ${e.lastDate || "—"} |`),
-        act.length ? "【目前生效】★ 為近三個交易日內出現的訊號" + (a.intraday ? "（盤中，收盤前可能改變）" : "") + "：" + act.map((e) => { const h = e.h[2]; return `${e.name}（${h.n || 0} 次、獨立 ${h.indep || 0} 次；20 日平均 ${h.n ? pc(h.mean) : "—"}，扣除來回成本約 ${ev.cost}% 後 ${ok(h.net) ? pc(h.net) : "—"}；證據：${G[h.grade]}）`; }).join("；") + "。" : "【目前生效】近三個交易日沒有出現上列訊號。",
-        `【證據總結】${ev.events.filter((e) => e.count > 0).length} 個訊號中，20 日報酬與基準有顯著差異的有 ${strong} 個、僅在未校正下顯著的有 ${weak} 個，其餘無法與「隨便買」區分或樣本不足。${strong === 0 ? "也就是說，在這檔股票上，這些常見技術訊號沒有可靠的統計優勢。" : ""}`,
-        "【怎麼讀】①「獨立」是持有期互不重疊的次數：連續幾天重複觸發其實是同一段行情，只能算一次證據。②「證據強度」是訊號平均報酬與基準的差異檢定：獨立樣本少於 10 次一律列為樣本不足；「顯著」已針對同時檢定 " + ev.tests + " 組做校正；「弱」代表單看這一組像是有效，但同時看這麼多組時，純屬巧合也會出現一兩個。③ 上漲機率高於基準不等於能獲利，要看平均報酬扣掉成本後還剩多少。",
-        "限制：這是樣本內統計（用同一段資料找規律也用它驗證），訊號的定義與參數是常見慣例、沒有為個股調整；股票長期上漲時，任何訊號的報酬都會偏正，所以一定要跟基準比。過去的分布不保證未來重現。",
+        `以這檔股票自己過去 ${ev.years} 年（${ev.bars} 個交易日）的還原權息日 K 回算。進場價＝訊號隔日開盤價，持有 5／10／20 個交易日後以收盤價出場。表格為「歷史上漲比例 / 平均毛報酬（已走完持有期的樣本數）」，未扣交易成本。`,
+        "| 訊號 | 事件次數 | 5 日 | 10 日 | 20 日 | 20 日獨立樣本 | 20 日超額 | 證據 | 最近一次 |", "|---|---|---|---|---|---|---|---|---|",
+        `| 基準（任意一天買進） | — | ${cell(b[0])} | ${cell(b[1])} | ${cell(b[2])} | ${b[2].indep || "—"} | — | — |  |`,
+        ...ev.events.filter((e) => e.count > 0).map((e) => `| ${e.active ? "★ " : ""}${e.name} | ${e.count} | ${cell(e.h[0])} | ${cell(e.h[1])} | ${cell(e.h[2])} | ${e.h[2].indep || 0} | ${ok(e.h[2].excess) ? pc(e.h[2].excess) : "—"} | ${G[e.h[2].grade]} | ${e.lastDate || "—"} |`),
+        act.length ? "【近三個交易日內發生的事件】" + (a.intraday ? "（盤中，收盤前可能改變）" : "") + act.map((e) => { const h = e.h[2]; return `${e.name}（${e.lastDate}；${ST(e)}；20 日：${h.n ? "歷史上漲比例 " + h.win + "%、平均毛報酬 " + pc(h.mean) + "，扣除來回費稅約 " + ev.cost + "% 後 " + (ok(h.net) ? pc(h.net) : "—") : "尚無成熟樣本"}；證據：${G[h.grade]}）`; }).join("；") + "。事件發生不等於條件仍成立。" : "【近三個交易日內發生的事件】無。",
+        `【證據總結】${ev.events.filter((e) => e.count > 0).length} 個訊號中，20 日報酬與基準的差異達到校正後門檻的有 ${strong} 個、只在未校正下達門檻的有 ${weak} 個，其餘無法與「任意一天買進」區分或樣本不足。${strong === 0 ? "在這檔股票上，這些常見訊號沒有可靠的統計優勢。" : "即使達到門檻，也只是樣本內結果，尚未經樣本外驗證。"}`,
+        "【怎麼讀】①「歷史上漲比例」是過去資料中出現的比例，未經校準，不是未來上漲的機率。②最近 5／10／20 日內發生的事件尚未走完持有期，已排除；各欄的 n 是已成熟的樣本數，所以三欄的 n 不同。③同一段行情中連續觸發的事件彼此相依；「獨立樣本」只計持有期互不重疊者，但價格本身的自我相關仍會讓檢定偏樂觀。④樣本數 10 次只是列入檢定的最低門檻，不代表統計有效；「達校正後門檻」是指對同時檢定的 " + ev.tests + " 組做 Bonferroni 校正後，平均報酬與基準的差異仍大於約 2.9 個標準誤。⑤表中報酬都是未扣成本的毛報酬；平均略高於基準不代表存在可交易的優勢。",
+        "【驗證範圍】只有樣本內統計：用同一段資料找規律也用它驗證。樣本外驗證（例如以前段資料決定、後段資料檢驗）尚未執行。訊號的定義與參數是常見慣例，沒有為個股調整。",
       ]);
     } else sec("歷史訊號統計", ["歷史資料不足 250 個交易日，無法進行事件統計。"]);
 
@@ -208,10 +229,11 @@ function buildReport(a) {
       `【結構】近 5 日報酬 ${pc(i.ret5)}。收盤${i.close >= i.ma5 ? "在 MA5（" + f(i.ma5) + "）之上，短線結構未破壞" : "跌破 MA5（" + f(i.ma5) + "），短線轉弱"}；MA10 在 ${f(i.ma10)}。`,
       `【動能】KD：K ${f(i.k, 1)}、D ${f(i.d, 1)}；${i.k > 80 ? "K 值高於 80，短線漲多，強勢股可能高檔鈍化，弱勢股容易拉回。" : i.k < 20 ? "K 值低於 20，短線跌深，留意反彈但不代表止跌。" : "位於中段，方向需靠量能決定。"} RSI(14) ${f(i.rsi, 1)}。`,
       `【量能】今日量為 5 日均量的 ${f(i.vol / i.vma5, 2)} 倍、20 日均量的 ${f(i.volRatio, 2)} 倍；${i.volRatio >= 1.5 && i.close > i.prevClose ? "價漲量增，短線買盤積極。" : i.volRatio >= 1.5 && i.close < i.prevClose ? "價跌量增，短線賣壓沉重。" : i.volRatio < 0.7 ? "量縮，市場觀望。" : "量能持平。"}`,
-      risk ? `【波動區間】以 ATR(14)＝${f(risk.atr14)} 估算，隔日正常波動範圍約 ${f(P - risk.atr14)} ~ ${f(P + risk.atr14)}；超出這個範圍代表出現異常消息或資金。` : "",
+      risk ? `【波動參考】ATR(14)＝${f(risk.atr14)} 元（平均真實波幅：近 14 日每日高低波動含跳空的平均），約為股價的 ${p0(risk.atrPct, 2)}。它描述波動大小，不是報酬的信賴區間；單日漲跌超過 1 倍 ATR 並不罕見，也不必然代表有消息。` : "",
       tu ? `【突破系統】前 20 日高點 ${f(tu.hi20)}（距現價 ${pc(tu.distHi20, 1)}）、前 10 日低點 ${f(tu.lo10)}。${tu.sys1 ? "收盤已站上 20 日高點，短線突破訊號成立。" : "尚未突破 20 日高點。"}${tu.exit1 ? "收盤已跌破 10 日低點，短線出場訊號成立。" : ""}` : "",
-      actS.length ? "【統計佐證】" + actS.map((e) => `「${e.name}」過去 ${e.h[0].n} 次（獨立 ${e.h[0].indep} 次），5 日後上漲機率 ${e.h[0].win}%、平均 ${pc(e.h[0].mean)}，證據強度：${{ insufficient: "樣本不足", none: "與基準無法區分", weak: "弱", strong: "顯著" }[e.h[0].grade]}`).join("；") + `（基準：${ev.baseline[0].win}%、${pc(ev.baseline[0].mean)}）。` : "",
-      `【觀察重點】向上看 ${r1 ? f(r1[1]) + "（" + r1[0] + "）" : "是否續創新高"}能否帶量站上；向下看 ${f(Math.min(i.ma5, i.ma10))} 是否守住。`,
+      actS.length ? "【統計佐證】" + actS.map((e) => `「${e.name}」過去 ${e.h[0].n} 次（獨立 ${e.h[0].indep} 次），5 日後歷史上漲比例 ${e.h[0].win}%、平均毛報酬 ${pc(e.h[0].mean)}，證據：${{ insufficient: "樣本不足", none: "與基準無法區分", weak: "弱（未校正）", strong: "達校正後門檻" }[e.h[0].grade]}`).join("；") + `（基準：${ev.baseline[0].win}%、${pc(ev.baseline[0].mean)}）。` : "",
+      (() => { const reclaim = [["MA5", i.ma5], ["MA10", i.ma10]].filter((x) => ok(x[1]) && x[1] > i.close), near = [["MA5", i.ma5], ["MA10", i.ma10], ["近 20 日低點", i.lo20]].filter((x) => ok(x[1]) && x[1] < i.close).sort((x, y) => y[1] - x[1])[0] || s1;
+        return `【觀察重點】${r1 ? "向上看 " + f(r1[1]) + "（" + r1[0] + "）能否帶量站上" : "上方沒有近期壓力，觀察能否續創新高"}；${near ? "向下看 " + f(near[1]) + "（" + near[0] + "）是否守住" : "下方沒有近期有效支撐"}。${reclaim.length ? reclaim.map((x) => x[0] + " " + f(x[1])).join("、") + " 位於現價之上，是需要收復的壓力，不是支撐。" : ""}`; })(),
     ]);
     sec("中線分析", [
       `【趨勢】近 20 日報酬 ${pc(i.ret20)}、近 60 日報酬 ${pc(i.ret60)}。月線（MA20）${f(i.ma20)}，方向${i.ma20 > i.ma20Prev ? "向上" : "向下"}；季線（MA60）${f(i.ma60)}${ok(i.ma60Prev) ? "，方向" + (i.ma60 > i.ma60Prev ? "向上" : "向下") : ""}。`,
@@ -220,10 +242,10 @@ function buildReport(a) {
       c20 !== null ? `【籌碼】法人近 20 日合計${c20 >= 0 ? "買超" : "賣超"} ${f(Math.abs(c20), 0)} 張${has && i.vma20 ? "，約佔同期成交量的 " + p0(Math.abs(c20) / (i.vma20 / 1000 * 20) * 100) : ""}。` : "",
       rev && rev.yoy3 ? `【基本面動能】近三個月營收年增率 ${rev.yoy3.map((x) => pc(x, 1)).join("、")}：${rev.yoy3.every((x, k) => k === 0 || (ok(x) && ok(rev.yoy3[k - 1]) && x >= rev.yoy3[k - 1])) ? "逐月加速。" : rev.yoy3.every((x) => ok(x) && x > 0) ? "維持成長。" : "成長動能不連續。"}` : "",
       tu ? `【突破系統】前 55 日高點 ${f(tu.hi55)}（距現價 ${pc(tu.distHi55, 1)}）、前 20 日低點 ${f(tu.lo20)}。${tu.sys2 ? "收盤已站上 55 日高點，中期突破訊號成立。" : "尚未突破 55 日高點。"}` : "",
-      ev && ev.baseline[2].n ? `【歷史基準】這檔股票任意持有 20 個交易日的上漲機率為 ${ev.baseline[2].win}%、平均報酬 ${pc(ev.baseline[2].mean)}、中位數 ${pc(ev.baseline[2].median)}。` : "",
+      ev && ev.baseline[2].n ? `【歷史基準】這檔股票任意一天買進持有 20 個交易日的歷史上漲比例為 ${ev.baseline[2].win}%、平均報酬 ${pc(ev.baseline[2].mean)}、中位數 ${pc(ev.baseline[2].median)}。` : "",
     ]);
     sec("長線分析", [
-      ok(i.ma240) ? `【趨勢】年線（MA240）${f(i.ma240)}，股價${i.close > i.ma240 ? "在年線之上" : "在年線之下"}；近一年報酬 ${pc(i.ret240)}${ok(rsOf(750).ret) ? "、近三年 " + pc(rsOf(750).ret) : ""}。${tr ? tr.stageName + "。" : ""}` : `歷史資料 ${i.bars} 根，不足以計算年線。`,
+      ok(i.ma240) ? `【趨勢】年線（MA240）${f(i.ma240)}，股價${i.close > i.ma240 ? "在年線之上" : "在年線之下"}；近 250 個交易日報酬 ${ok(rsOf(250).ret) ? pc(rsOf(250).ret) : "無法計算"}${ok(rsOf(750).ret) ? "、近 750 個交易日 " + pc(rsOf(750).ret) : ""}。${tr ? tr.stageName + "。" : ""}` : `歷史資料 ${i.bars} 根，不足以計算年線。`,
       etf ? "ETF 的長線表現主要取決於追蹤指數與配息政策，個股型基本面指標不適用。" : `【估值】本益比 ${f(fu.pe, 1)} 倍、股價淨值比 ${f(fu.pb, 2)} 倍、殖利率 ${ok(fu.yield) ? p0(fu.yield, 2) : "—"}${fu.own ? "；本益比位於自身五年分布第 " + fu.own.pePct + " 百分位" : ""}。`,
       !etf && ok(fu.epsTTM) ? `【獲利】近四季 EPS 合計 ${f(fu.epsTTM)} 元${ok(fu.epsTTMYoY) ? "（年增 " + pc(fu.epsTTMYoY, 1) + "）" : ""}；ROE ${ok(fu.roe) ? p0(fu.roe) : "—"}。長線報酬 ≈ 獲利成長 ＋ 估值變化 ＋ 股利，三者需分開判斷。` : "",
       !etf && ok(fu.epsTTMYoY) && fu.own ? `【組合判斷】${fu.epsTTMYoY > 15 && fu.own.pePct < 50 ? "獲利成長且估值低於歷史中位數：成長尚未被完全反映在價格上。" : fu.epsTTMYoY > 15 && fu.own.pePct >= 80 ? "獲利成長但估值已在歷史高檔：好消息有相當部分已反映，需要獲利持續超出預期才能支撐。" : fu.epsTTMYoY < 0 && fu.own.pePct >= 60 ? "獲利衰退而估值偏高：最不利的組合，本益比有下修壓力。" : fu.epsTTMYoY < 0 ? "獲利衰退但估值偏低：市場已反映悲觀預期，關鍵是衰退何時結束。" : "獲利與估值都在中間地帶，沒有明顯的錯價。"}` : "",
@@ -347,7 +369,7 @@ function buildReport(a) {
   if (fu.own && fu.own.pePct >= 90) risks.push(`本益比位於自身五年第 ${fu.own.pePct} 百分位，估值已在歷史高檔，獲利不如預期時修正幅度可能較大。`);
   else if (fu.pe > 40) risks.push("本益比高於 40 倍，獲利不如預期時估值修正幅度可能較大。");
   if (ok(fu.debtRatio) && fu.debtRatio > 70 && !/金融/.test(q.industry || "")) risks.push(`負債比 ${p0(fu.debtRatio)}，財務槓桿偏高。`);
-  if (has && i.pos240 >= 85) risks.push("位於一年區間高檔，利多鈍化風險。");
+  if (has && i.pos250 >= 85) risks.push("位於 52 週區間高檔，利多鈍化風險。");
   if (risk && risk.vol60 >= 50) risks.push(`近 60 日年化波動 ${p0(risk.vol60)}，屬於高波動股，部位應相應縮小。`);
   if (risk && ok(risk.beta) && risk.beta >= 1.5) risks.push(`Beta ${f(risk.beta)}，大盤下跌時跌幅會被放大。`);
   if (risk && risk.avgValue20 < 5e7) risks.push(`近 20 日日均成交值僅 ${yi(risk.avgValue20)}，流動性偏低，大單進出會有明顯滑價。`);
@@ -377,14 +399,18 @@ function buildReport(a) {
       "VaR 以歷史模擬法計算，假設未來的報酬分布與過去一年相似；極端事件的損失可能超過上列數字。",
     ]);
     const stops = []; if (s1) stops.push(["跌破 " + s1[0], s1[1] * 0.99]); if (tu) stops.push(["海龜 2N", P - 2 * tu.N]);
-    const sz = Q.sizing(P, risk.atr14, stops, 1000000, 1);
+    const sz = Q.sizing(P, risk.atr14, stops, 1000000, 1, (x) => roundTick(x, etf, -1));
+    const gap = ok(risk.worstGap) ? Math.abs(risk.worstGap) : null;
     sec("部位規模試算", sz && sz.length ? [
       "固定比例風險法：先決定「這筆交易最多虧多少」，再由停損距離反推可以買多少。以本金 100 萬元、單筆風險 1%（1 萬元）為例：",
-      "| 停損方式 | 停損價 | 停損距離 | 可買股數 | 部位金額 | 佔本金 |", "|---|---|---|---|---|---|",
-      ...sz.map((x) => `| ${x.name} | ${f(x.stop)} | ${p0(x.distPct)} | ${f(x.shares, 0)} 股（${f(x.lots, 2)} 張） | ${f(Math.min(x.value, 1000000), 0)} 元${x.weight > 100 ? "（受本金上限限制）" : ""} | ${p0(Math.min(x.weight, 100))} |`),
+      "| 停損方式 | 停損價 | 停損距離 | 可買股數（整張＋零股） | 部位金額 | 佔本金 | 跳空壓力損失（佔本金） |", "|---|---|---|---|---|---|---|",
+      ...sz.map((x) => { const sh = x.weight > 100 ? Math.floor(1000000 / P) : x.shares, val = sh * P, loss = gap === null ? null : val * Math.max(x.distPct, gap) / 100;
+        return `| ${x.name} | ${f(x.stop)} | ${p0(x.distPct)} | ${f(sh, 0)} 股（${Math.floor(sh / 1000)} 張＋${sh % 1000} 股） | ${f(val, 0)} 元${x.weight > 100 ? "（受本金上限限制）" : ""} | ${p0(Math.min(x.weight, 100))} | ${loss === null ? "—" : f(loss, 0) + " 元（" + p0(loss / 10000, 2) + "）"} |`; }),
+      gap !== null ? `【跳空壓力】以一年內最大向下跳空 ${p0(gap, 2)} 估算：若開盤直接跳過停損價，實際損失約為部位 × max(停損距離, 跳空幅度)，可能超過設定的 1 萬元。停損價已取到合法升降單位（向下取）。` : "",
+      "【與海龜方法的差異】上表是「停損距離對應本金 1%」；海龜原方法是「1N 的價格波動＝本金 1%」來決定一個單位，停損設在 2N 時單筆風險約為本金 2%。兩種設定的部位大小不同，請勿混用。",
       "【怎麼用】本金或風險比例不同時等比例換算：例如本金 300 萬、風險 0.5%，股數乘以 1.5。停損距離越遠，可買的股數越少——這就是波動大的股票部位要小的原因。",
-      P * 1000 > 1000000 * 0.5 ? `這檔股票一張約 ${f(P * 1000, 0)} 元，依上表計算的股數不足一張時，需以零股交易執行。` : "",
-      risk.avgValue20 ? (() => { const big = Math.min(Math.max(...sz.map((x) => x.value)), 1000000), r = big / risk.avgValue20 * 100; return `【流動性檢查】上表最大部位約佔這檔股票日均成交值的 ${r < 0.01 ? "不到 0.01%" : p0(r, 2)}；低於 1% 時進出對價格幾乎沒有影響。`; })() : "",
+      P * 1000 > 1000000 * 0.5 ? `這檔股票一張約 ${f(P * 1000, 0)} 元；上表不足一張的部分需以零股交易，零股的成交量與撮合方式與整股不同。` : "",
+      risk.avgValue20 ? (() => { const big = Math.min(Math.max(...sz.map((x) => x.value)), 1000000), r = big / risk.avgValue20 * 100; return `【流動性檢查】上表最大部位約佔這檔股票日均成交值的 ${r < 0.01 ? "不到 0.01%" : p0(r, 2)}。比例低通常衝擊較小，但不保證能以預期價格成交：本站未納入委託簿深度、盤中流動性變化與漲跌停鎖死無法成交的情況。`; })() : "",
       "此為風險管理的計算示範，不是建議的部位大小；跳空開盤時實際虧損會大於設定的風險金額。",
     ] : ["資料不足，無法試算。"]);
   } else { sec("量化風險指標", ["歷史 K 線資料暫時無法取得。"]); sec("部位規模試算", ["歷史 K 線資料暫時無法取得。"]); }
@@ -395,12 +421,15 @@ function buildReport(a) {
     sec("操作策略", [
       "以下為情境推演與觀察條件，不是買賣指令；進出與部位由使用者自行決定。",
       mkt ? `【前提：大盤】${mkt.above50 && mkt.above200 ? "大盤處於多頭環境，順勢做多的條件成立。" : !mkt.above200 ? "大盤位於 200 日均線之下。順勢交易的原則是：大盤空頭時降低部位或暫停做多，因為多數個股會跟著大盤走。" : "大盤方向不明，宜降低單筆風險。"}` : "",
-      `【多方情境】成立條件：收盤帶量（高於 20 日均量）站上 ${f(trig)}${r1 ? "（" + r1[0] + "）" : ""}，且法人未轉賣。${A ? "以站上當日收盤為基準，初始停損參考 2 倍 ATR（約 " + f(2 * A) + " 元）；風險報酬比 1:2 與 1:3 對應的價位約為 " + f(trig + 2 * R) + " 與 " + f(trig + 3 * R) + "。" : ""}${res[1] ? "上方下一個壓力在 " + f(res[1][1]) + "（" + res[1][0] + "）。" : ""}`,
-      `【拉回情境】若未突破而拉回：${s1 ? "第一個支撐 " + f(s1[1]) + "（" + s1[0] + "）" + (sup[1] ? "、第二個 " + f(sup[1][1]) + "（" + sup[1][0] + "）" : "") + "。拉回時量縮、守住支撐後再轉強，風險報酬比通常優於追高。" : "下方沒有近期技術支撐，拉回的深度難以預估。"}`,
+      `【多方情境】成立條件：收盤帶量（高於 20 日均量）站上 ${f(trig)}${r1 ? "（" + r1[0] + "）" : ""}，且法人未轉賣。${A ? "若以 " + f(trig) + " 為假設進場價、停損 2 倍 ATR（" + f(trig - R) + "，每股風險 " + f(R) + " 元），2R／3R 的算術價位為 " + f(trig + 2 * R) + "／" + f(trig + 3 * R) + "，這只是條件式算術，不代表價格會到達。" : ""}`,
+      (() => { if (!A) return ""; const nx = res.find((x) => x[1] > trig * 1.003), slip = 0.1, cost = 0.585 + 2 * slip; if (!nx) return "【空間檢查】假設進場價之上沒有近期壓力，無法以壓力估算可用空間。";
+        const space = nx[1] - trig, rm = space / R, net = (space - trig * cost / 100) / R;
+        return `【空間檢查】從假設進場價 ${f(trig)} 到下一個壓力 ${f(nx[1])}（${nx[0]}）的空間為 ${f(space)} 元，約 ${f(rm, 2)} R；扣除來回費稅約 0.585% 與假設滑價每邊 ${slip}% 後約 ${f(net, 2)} R。${rm < 1 ? "空間不足 1R：條件成立後，到下一個壓力前的潛在報酬仍小於停損風險，能算出 2R 價位不代表這筆交易合理。" : rm < 2 ? "空間在 1R～2R 之間，2R 價位位於下一個壓力之上，需先突破該壓力。" : ""}`; })(),
+      `【拉回情境】若未突破而拉回：${s1 ? "第一個支撐 " + f(s1[1]) + "（" + s1[0] + "）" + (sup[1] ? "、第二個 " + f(sup[1][1]) + "（" + sup[1][0] + "）" : "") + "。" + (A && r1 ? "若在支撐附近進場、停損設在支撐下方 1 倍 ATR（" + f(s1[1] - A) + "），到上方壓力 " + f(r1[1]) + " 約 " + f((r1[1] - s1[1]) / A, 2) + " R（未扣費稅）。" : "") : "下方沒有近期技術支撐，拉回的深度難以預估。"}`,
       `【空方／風險情境】成立條件：${s1 ? "收盤跌破 " + f(s1[1]) + "（" + s1[0] + "）" : "反彈無法站回月線 " + f(i.ma20)}且量能放大；${sup[1] ? "下一個支撐在 " + f(sup[1][1]) + "（" + sup[1][0] + "）。" : "下方支撐不明確。"}`,
       `【反證條件】目前判斷為「${stance}」。若${stance === "偏多" ? (s1 ? "收盤跌破 " + f(s1[1]) : "跌破月線") + "，或法人轉為連續賣超、營收年增轉負" : stance === "偏空" ? (r1 ? "帶量站回 " + f(r1[1]) : "站回月線") + "且法人轉買" : "價格帶量脫離 " + (s1 ? f(s1[1]) : "—") + " ~ " + (r1 ? f(r1[1]) : "—") + " 區間"}，代表這個看法已經失效，應重新評估而不是加碼攤平。`,
       "【紀律】先定停損與部位、再進場（見「部位規模試算」）；虧損的部位不加碼；獲利的部位以移動停損（例如 10 日低點或 2 倍 ATR）保護，讓獲利延續。",
-      ev && ev.baseline[2].n ? `【期望值提醒】這檔股票歷史上任意持有 20 日的上漲機率為 ${ev.baseline[2].win}%。任何訊號都只是把機率往有利方向推一些，單筆交易的結果仍有很大的隨機性。` : "",
+      ev && ev.baseline[2].n ? `【基準】這檔股票歷史上任意一天買進持有 20 個交易日，上漲比例為 ${ev.baseline[2].win}%、平均毛報酬 ${pc(ev.baseline[2].mean)}（樣本內）。這是比較用的基準，不是對下一筆交易的預測。` : "",
     ]);
   } else sec("操作策略", ["資料不足，暫不提供情境推演。"]);
 
@@ -408,21 +437,32 @@ function buildReport(a) {
   const cs = [];
   if (!etf) {
     const e6 = rsOf(120).excess, e3 = rsOf(60).excess;
-    cs.push(["C 當季獲利", "單季 EPS 年增 ≥ 25%", ok(fu.epsYoY) ? pc(fu.epsYoY, 1) : "無財報資料", ok(fu.epsYoY) ? fu.epsYoY >= 25 : null]);
-    cs.push(["A 年度獲利", "近四季 EPS 年增 ≥ 25% 且 ROE ≥ 17%", `${ok(fu.epsTTMYoY) ? pc(fu.epsTTMYoY, 1) : "—"}、ROE ${ok(fu.roe) ? p0(fu.roe) : "—"}`, ok(fu.epsTTMYoY) && ok(fu.roe) ? fu.epsTTMYoY >= 25 && fu.roe >= 17 : null]);
-    cs.push(["N 新高", "股價距 52 週高點 15% 以內", has ? "距高點 " + pc((P / i.hi240 - 1) * 100, 1) : "—", has ? P >= i.hi240 * 0.85 : null]);
-    cs.push(["S 供需", "上漲日均量大於下跌日均量", has && ok(i.upVolAvg) && ok(i.dnVolAvg) ? `${f(i.upVolAvg / 1000, 0)} 張 vs ${f(i.dnVolAvg / 1000, 0)} 張` : "—", has && ok(i.upVolAvg) && ok(i.dnVolAvg) ? i.upVolAvg > i.dnVolAvg : null]);
-    cs.push(["L 領導股", "近 3 個月與 6 個月都強於大盤", ok(e3) ? `${pc(e3, 1)}、${pc(e6, 1)}` : "無大盤資料", ok(e3) && ok(e6) ? e3 > 0 && e6 > 0 : null]);
-    cs.push(["I 法人", "法人近 20 日買超且外資持股上升", `${c20 !== null ? sgn(c20) + " 張" : "—"}、外資持股 ${hold ? pc(hold.ratio - hold.ratio20) : "—"}`, c20 !== null && hold ? c20 > 0 && hold.ratio > hold.ratio20 : null]);
-    cs.push(["M 大盤", "指數在 50 日與 200 日均線之上", mkt ? (mkt.above50 ? "50 日之上" : "50 日之下") + "、" + (mkt.above200 ? "200 日之上" : "200 日之下") : "無大盤資料", mkt ? mkt.above50 && mkt.above200 : null]);
+    const cState = !ok(fu.epsQ) ? null : fu.epsQ <= 0 ? false : ok(fu.epsYoY) ? fu.epsYoY >= 25 : fu.epsYoYNote && /不適用/.test(fu.epsYoYNote) ? "na" : null;
+    const cText = !ok(fu.epsQ) ? "無財報資料" : fu.epsQ <= 0 ? `本季 EPS ${f(fu.epsQ)} 元（虧損）` : ok(fu.epsYoY) ? pc(fu.epsYoY, 1) : `本季 EPS ${f(fu.epsQ)} 元；${fu.epsYoYNote || "資料不足"}`;
+    const aEps = !ok(fu.epsTTM) ? null : fu.epsTTM <= 0 ? false : ok(fu.epsTTMYoY) ? fu.epsTTMYoY >= 25 : fu.epsTTMYoYNote && /不適用/.test(fu.epsTTMYoYNote) ? "na" : null;
+    const aRoe = ok(fu.roe) ? fu.roe >= 17 : null;
+    cs.push(["C 當季獲利", "單季 EPS 較去年同季成長 ≥ 25%", cText, cState, "fund"]);
+    cs.push(["A 年度獲利", "近四季 EPS 年增 ≥ 25% 且 ROE ≥ 17%（替代：原方法要求近 3 年年度 EPS 每年成長，本站只比較近四季與前四季）", `${ok(fu.epsTTMYoY) ? pc(fu.epsTTMYoY, 1) : !ok(fu.epsTTM) ? "無財報資料" : fu.epsTTM <= 0 ? "近四季 EPS 合計為負" : fu.epsTTMYoYNote || "資料不足"}、ROE ${ok(fu.roe) ? p0(fu.roe) : "資料不足"}`, andState(aEps, aRoe), "fund"]);
+    cs.push(["N 新高", "股價距 52 週高點 15% 以內（原方法另含新產品、新管理層等質性條件，本站未納入）", has ? "距高點 " + pc((P / i.hi250 - 1) * 100, 1) : "—", has ? P >= i.hi250 * 0.85 : null, "mkt"]);
+    cs.push(["S 供需", "上漲日均量大於下跌日均量（替代：原方法看流通股數與需求）", has && ok(i.upVolAvg) && ok(i.dnVolAvg) ? `${f(i.upVolAvg / 1000, 0)} 張 vs ${f(i.dnVolAvg / 1000, 0)} 張` : "—", has && ok(i.upVolAvg) && ok(i.dnVolAvg) ? i.upVolAvg > i.dnVolAvg : null, "mkt"]);
+    cs.push(["L 領導股", "近 3 個月與 6 個月都強於大盤（替代：原方法使用 RS 評等 ≥ 80）", ok(e3) ? `${pc(e3, 1)}、${pc(e6, 1)}` : "無大盤資料", ok(e3) && ok(e6) ? e3 > 0 && e6 > 0 : null, "mkt"]);
+    cs.push(["I 法人", "法人近 20 日買超且外資持股上升（替代：原方法看優質機構持有家數增加）", `${c20 !== null ? sgn(c20) + " 張" : "—"}、外資持股 ${hold ? pc(hold.ratio - hold.ratio20) : "—"}`, andState(c20 !== null ? c20 > 0 : null, hold ? hold.ratio > hold.ratio20 : null), "mkt"]);
+    cs.push(["M 大盤", "指數在 50 日與 200 日均線之上", mkt ? (mkt.above50 ? "50 日之上" : "50 日之下") + "、" + (mkt.above200 ? "200 日之上" : "200 日之下") : "無大盤資料", mkt ? mkt.above50 && mkt.above200 : null, "mkt"]);
   }
-  const csPass = cs.filter((x) => x[3] === true).length, csTot = cs.filter((x) => x[3] !== null).length;
+  const csPass = cs.filter((x) => x[3] === true).length, csTot = cs.filter((x) => x[3] === true || x[3] === false).length;
+  const csNA = cs.filter((x) => x[3] === "na").length, csNull = cs.filter((x) => x[3] === null || x[3] === undefined).length;
+  const fundCS = cs.filter((x) => x[4] === "fund"), mktCS = cs.filter((x) => x[4] === "mkt");
+  const growth = fundCS.length ? andState(...fundCS.map((x) => x[3])) : null;
+  const growthWord = growth === true ? "成立" : growth === false ? "未成立（" + fundCS.filter((x) => x[3] === false).map((x) => x[0][0]).join("、") + " 未符合）" : growth === "na" ? "不適用（比較基期為負）" : "資料不足";
+  const trendOk = trendState === "full" || trendState === "mostly";
+
   sec("交易員檢核表", [
     "把三套公開出版、被專業交易員廣泛引用的方法寫成程式，逐條比對這檔股票目前的數據。它們回答的是「現在符不符合這套方法的進場條件」，不是任何人對這檔股票的看法。",
-    tr ? `【一、趨勢模板】符合 ${tr.passed} / ${tr.total} 項，${tr.stageName}。${tr.passed >= 7 ? "符合趨勢交易的選股條件。" : "未達該方法要求的全數符合。"}（逐項結果見「技術」分頁）` : "【一、趨勢模板】資料不足。",
-    ...(cs.length ? [`【二、成長動能七項（CAN SLIM 架構）】符合 ${csPass} / ${csTot} 項：`, "| 項目 | 條件 | 現況 | 結果 |", "|---|---|---|---|", ...cs.map((x) => `| ${x[0]} | ${x[1]} | ${x[2]} | ${mark(x[3])} |`)] : ["【二、成長動能七項】ETF 不適用。"]),
-    tu ? `【三、海龜通道】N（20 日 ATR）＝${f(tu.N)}。短期系統：${tu.sys1 ? "已突破" : "未突破"} 20 日高點 ${f(tu.hi20)}，出場線為 10 日低點 ${f(tu.lo10)}；長期系統：${tu.sys2 ? "已突破" : "未突破"} 55 日高點 ${f(tu.hi55)}，出場線為 20 日低點 ${f(tu.lo20)}。該方法的停損為進場價減 2N（以現價計約 ${f(tu.stop2N)}），每單位部位使 1N 的波動等於本金的 1%。` : "",
-    tr && cs.length ? `【綜合】${tr.passed >= 7 && csPass >= 5 ? "趨勢與成長條件同時成立，是這些方法共同定義的強勢股型態。" : tr.passed >= 6 && csPass < 4 ? "價格趨勢成立，但基本面成長條件不足：屬於資金或題材推動，延續性需靠基本面跟上。" : tr.passed < 4 && csPass >= 5 ? "基本面成長條件成立，但價格趨勢尚未確認：這些方法會等待股價轉入上升階段後才進場。" : "趨勢與成長條件都不完整，不符合這些方法的進場標準。"}` : "",
+    tr ? `【一、趨勢模板】符合 ${tr.passed} / ${tr.total} 項，${trendWord[trendState]}；${tr.stageName}。${trendState === "full" ? "符合該方法的選股條件。" : "未達該方法要求的全數符合" + (trendMiss.length ? "（" + trendMiss.join("、") + "）" : "") + "。"}（逐項結果見「技術」分頁）` : "【一、趨勢模板】資料不足。",
+    ...(cs.length ? [`【二、成長動能七項（CAN SLIM 架構的簡化版）】可判定的 ${csTot} 項中符合 ${csPass} 項${csNull ? "；資料不足 " + csNull + " 項" : ""}${csNA ? "；不適用 " + csNA + " 項" : ""}：`, "| 項目 | 條件（含本站替代說明） | 現況 | 結果 |", "|---|---|---|---|", ...cs.map((x) => `| ${x[0]} | ${x[1]} | ${x[2]} | ${mark(x[3])} |`),
+      "C、A 兩項是基本面成長；N、S、L、I、M 是價格、供需、法人與大盤條件。兩組分開判讀，不以總數相加代替。這是以公開資料做的簡化代理，不等於完整重現原方法。"] : ["【二、成長動能七項】ETF 不適用。"]),
+    tu ? `【三、海龜通道】N（20 日 ATR）＝${f(tu.N)}。短期系統：${tu.sys1 ? "已突破" : "未突破"} 20 日高點 ${f(tu.hi20)}，出場線為 10 日低點 ${f(tu.lo10)}；長期系統：${tu.sys2 ? "已突破" : "未突破"} 55 日高點 ${f(tu.hi55)}，出場線為 20 日低點 ${f(tu.lo20)}。原方法的停損為進場價減 2N（以現價計約 ${f(tu.stop2N)}），並以「1N 的價格波動＝本金 1%」決定一個單位。本站只提供通道價位參考，未實作原方法的分批加碼（每 0.5N 加一單位）、單位上限與前次獲利過濾規則，不等同完整交易系統。` : "",
+    tr && cs.length ? `【綜合】價格趨勢（趨勢模板）：${trendWord[trendState]}；基本面成長（C、A）：${growthWord}；價格與市場面（N、S、L、I、M）：可判定 ${mktCS.filter((x) => x[3] === true || x[3] === false).length} 項中符合 ${mktCS.filter((x) => x[3] === true).length} 項。${trendOk && growth === true ? "趨勢與成長同時成立，是這些方法共同定義的型態。" : trendOk && growth === false ? "價格趨勢成立，但基本面成長條件未符合：延續性需靠基本面跟上。" : !trendOk && growth === true ? "基本面成長成立，但價格趨勢未成立：這些方法會等股價轉入上升階段後才考慮。" : !trendOk && growth === false ? "趨勢與成長條件都未成立，不符合這些方法的進場標準。" : "部分條件資料不足或不適用，無法用這些方法下結論。"}` : "",
     "重要：這些方法原本是為美股設計，門檻（如 25%、17%）直接沿用原著；套用在台股的有效性沒有經過本站回測驗證。",
   ]);
 
@@ -444,8 +484,11 @@ function buildReport(a) {
 
   sec("綜合分析", [
     `綜合評分 ${sc.score}/100（${sc.grade}）：基本面 ${sc.detail._fund}/20、技術面 ${sc.detail._tech}/25、量價 ${sc.detail._vol}/15、籌碼 ${sc.detail._chip}/20、融資 ${sc.detail._margin}/10、題材 ${sc.detail._theme}/10。`,
-    bull.length ? `【正向條件 ${bull.length} 項】` + bull.join("、") + "。" : "", bear.length ? `【負向條件 ${bear.length} 項】` + bear.join("、") + "。" : "",
-    tr || cs.length ? `【方法檢核】趨勢模板 ${tr ? tr.passed + "/" + tr.total : "—"}；成長動能七項 ${cs.length ? csPass + "/" + csTot : "不適用"}${tr ? "；" + tr.stageName : ""}。` : "",
+    `（適用滿分 ${sc.applicable}；其中 ${sc.applicable - sc.known} 分的項目資料不足、未計分${sc.naKeys && sc.naKeys.length ? "；ETF 不適用基本面、融資與題材項目，這部分不計分也不從分母扣除，分數不宜與個股直接比較" : ""}。）`,
+    ...vote.categories.map((c) => `【${c.name}：${c.sign > 0 ? "偏多" : c.sign < 0 ? "偏空" : "互相抵銷"}】` + c.items.map((x) => x[1]).join("、")),
+    has && tr && sc.detail._tech <= 5 && trendOk ? "【時間尺度】評分的技術面（站上月線、月線與季線方向、20 日突破）衡量 1～3 個月的結構，目前偏弱；趨勢模板衡量 50～200 日的長期結構，目前仍成立。兩者不矛盾，代表長期趨勢中的短中期修正。" : "",
+    has && tr && sc.detail._tech >= 20 && trendState === "no" ? "【時間尺度】短中期技術面偏強，但長期趨勢模板未成立：屬於長期結構尚未轉強時的反彈或初升。" : "",
+    tr || cs.length ? `【方法檢核】趨勢模板 ${tr ? tr.passed + "/" + tr.total + "（" + trendWord[trendState] + "）" : "—"}；成長動能七項 ${cs.length ? csPass + "/" + csTot + "（基本面成長：" + growthWord + "）" : "不適用"}${tr ? "；" + tr.stageName : ""}。` : "",
     risk ? `【風險輪廓】年化波動 ${p0(risk.vol60)}、Beta ${f(risk.beta)}、一年最大回撤 ${p0(risk.maxDD)}。` : "",
     a.missing && a.missing.length ? "【資料缺口】" + a.missing.join("、") + "；相關段落與評分項目未計入。" : "",
     "本報告為規則式分析：只陳述數據符合哪些條件與歷史統計，不包含對新聞、法說會或產業事件的判讀。",
@@ -453,14 +496,14 @@ function buildReport(a) {
   const hzLine = (h) => `【${h.name}（${h.span}）：${h.view}】支持：${h.pros.length ? h.pros.join("、") : "無"}｜相反：${h.cons.length ? h.cons.join("、") : "無"}`;
   const strongEv = ev ? ev.events.filter((e) => e.active && e.h[2].grade === "strong").length : 0;
   sec("最終裁定", [
-    stance === "中性" ? `中性震盪：正向條件 ${bull.length} 項、負向條件 ${bear.length} 項，多空訊號沒有明顯一面倒。` : `${stance}：正向條件 ${bull.length} 項、負向條件 ${bear.length} 項。`,
-    "上面是把所有條件等權相加的整體結果。不同時間尺度的結論可能不同，請依自己的持有期間看對應的那一行：",
+    `${stance === "中性" ? "中性震盪" : stance}（整體，綜合短中長期）：${vote.total} 個類別中 ${vote.bull} 個偏多、${vote.bear} 個偏空、${vote.neutral} 個互相抵銷。${vote.conflict ? "多空兩方都有 2 個以上類別支持，屬於分歧，不硬湊單一方向。" : ""}`,
+    "每個類別（價格趨勢、動能、相對強弱、籌碼、基本面、大盤）只算一票，避免高度相關的價格指標重複計票。不同時間尺度的結論可能不同，請依自己的持有期間看對應的那一行：",
     ...horizons.map(hzLine),
     horizons.length === 3 && new Set(horizons.map((h) => h.view)).size > 1 ? `【週期不一致】${horizons.map((h) => h.name + h.view).join("、")}。這不是矛盾：${horizons[2].view === "偏多" && horizons[0].view === "偏空" ? "長期趨勢仍在但短線正在修正，對長線持有者是觀察支撐是否守住，對短線交易者則是逆風。" : horizons[2].view === "偏空" && horizons[0].view === "偏多" ? "長期趨勢向下中的短線反彈，延續性通常較差。" : "代表趨勢正在轉換或整理，方向尚未確立。"}` : "",
     `【判斷失效條件】${r1 ? "收盤站上 " + f(r1[1]) + "（" + r1[0] + "）" : "續創新高"}會削弱偏空的看法；${s1 ? "收盤跌破 " + f(s1[1]) + "（" + s1[0] + "）" : "跌破近期低點"}會削弱偏多的看法。`,
-    `【證據強度】①整體與各週期的方向是「符合條件的數量」，條件之間沒有加權，也沒有經過回測證明這種計數法能預測漲跌。②歷史訊號統計中，目前生效且達到顯著水準的訊號有 ${strongEv} 個${ev ? "" : "（無統計資料）"}。③基本面與估值數字來自官方與財報，屬於事實；「偏多／偏空」是對這些事實的機械歸納，屬於推論。`,
+    `【證據強度】①整體方向是「類別票數」，各週期方向是「條件數量」，都沒有加權，也沒有經過回測證明能預測漲跌；它們不是機率。②歷史訊號統計中，近三日發生、且 20 日報酬達校正後門檻的訊號有 ${strongEv} 個${ev ? "" : "（無統計資料）"}。③基本面與估值數字來自官方與財報，屬於事實；「偏多／偏空」是對這些事實的機械歸納，屬於推論。`,
     "這是依固定規則計算的結果，屬於機率性判斷而非預測，請搭配回測系統與自己的研究使用。",
   ]);
-  return { text: S.join("\n\n"), stance, tags, horizons };
+  return { text: S.join("\n\n"), stance, tags, horizons, stanceDetail: { bull: vote.bull, bear: vote.bear, neutral: vote.neutral, total: vote.total, conflict: vote.conflict, categories: vote.categories.map((c) => ({ name: c.name, sign: c.sign, items: c.items.map((x) => x[1]) })) } };
 }
-module.exports = { buildReport };
+module.exports = { buildReport, voteCategories, andState };

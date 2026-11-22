@@ -14,7 +14,7 @@
 // ENGINE META
 // ════════════════════════════════════════════════════════════
 var BT_ENGINE = {
-  version:    '4.1.0',
+  version:    '4.2.0',
   buildDate:  '2026-05-15',
   features:   ['long','short','worker','exposure','metrics-v2'],
   // 預留接口
@@ -738,7 +738,20 @@ function portfolioUpdateMark(pf, currentPrice) {
 
 var ExecutionEngine = (function() {
 
-  var WARMUP = 250; // MA200 需要 200 根，再留 50 根穩定
+  // 暖機期：由「所選策略」實際需要的回看長度決定（例如均線 5/20 → 21 根）。
+  // 舊版固定 250 根：只選一年（約 242 根）時永遠不會交易，選五年時第一年也被靜默略過。
+  // 指標未就緒前訊號引擎本來就回傳 0，所以依參數推算是安全的。沒有參數的舊策略格式沿用 250。
+  var LEGACY_WARMUP = 250;
+  function lookbackOf(list) {
+    var m = 0;
+    (list || []).forEach(function(s) {
+      var p = s && s.params; if (!p) { m = Math.max(m, LEGACY_WARMUP); return; }
+      var v = 0; ['period', 'fast', 'slow', 'volPeriod'].forEach(function(k) { if (+p[k] > v) v = +p[k]; });
+      if (+p.signal > 0) v = Math.max(v, (+p.slow || 26) + (+p.signal)); // MACD：慢線 EMA 加上訊號線 EMA
+      m = Math.max(m, v || 20);
+    });
+    return m;
+  }
 
   function run(data, config) {
     var n       = data.closes.length;
@@ -759,6 +772,13 @@ var ExecutionEngine = (function() {
     var shortEnabled  = !!config.shortEnabled;
 
     var longStrat  = { entry: config.longEntry  || [], exit: config.longExit  || [] };
+    var warmup = Math.max(lookbackOf(config.longEntry), lookbackOf(config.longExit),
+      shortEnabled ? lookbackOf(config.shortEntry) : 0, shortEnabled ? lookbackOf(config.shortExit) : 0, 1) + 1;
+    // 診斷：訊號出現幾次、幾次因資金不足一張（或其他原因）沒有成交
+    var diag = { warmup: warmup, tradeFrom: dates[Math.min(warmup, n - 1)] || null, bars: n, entrySignals: 0, exitSignals: 0, rejected: 0, rejectedCash: 0, minCashNeeded: null, pendingAtEnd: false };
+    // 買進張數要把手續費算進去，否則 100% 部位時常因「股款＋手續費 > 現金」被靜默拒絕
+    function lotsFor(base, price, feeRate) { return Math.floor(base * posSizePct / (price * 1000 * (1 + feeRate))); }
+    function noteReject(price, feeRate) { diag.rejected++; var need = price * 1000 * (1 + feeRate); if (portfolioEquity(pf) < need) { diag.rejectedCash++; diag.minCashNeeded = Math.max(diag.minCashNeeded || 0, Math.round(need)); } }
     var shortStrat = { entry: config.shortEntry || [], exit: config.shortExit || [] };
 
     // Step 1: 預計算所有指標（傳入策略設定讓 precompute 動態計算）
@@ -810,8 +830,9 @@ var ExecutionEngine = (function() {
       if (execType === 'open' && i > 0) {
         if (pendingLongEntry && !pf.position) {
           var base = posBase === 'equity' ? portfolioEquity(pf) : capital;
-          var lots = Math.floor(base * posSizePct / (execPrice * 1000));
+          var lots = lotsFor(base, execPrice, buyFeeRate);
           portfolioEnterLong(pf, lots, execPrice, date, buyFeeRate);
+          if (!pf.position) noteReject(execPrice, buyFeeRate);
           if (pf.position) {
             trades.push({ type: 'entry', side: 'long', date: date, price: execPrice, qty: lots, reason: 'strategy' });
           }
@@ -822,8 +843,9 @@ var ExecutionEngine = (function() {
         }
         if (pendingShortEntry && !pf.position) {
           var base = posBase === 'equity' ? portfolioEquity(pf) : capital;
-          var lots = Math.floor(base * posSizePct / (execPrice * 1000));
+          var lots = lotsFor(base, execPrice, buyFeeRate);
           portfolioEnterShort(pf, lots, execPrice, date, buyFeeRate);
+          if (!pf.position) noteReject(execPrice, buyFeeRate);
           if (pf.position) {
             trades.push({ type: 'entry', side: 'short', date: date, price: execPrice, qty: lots, reason: 'strategy' });
           }
@@ -878,24 +900,28 @@ var ExecutionEngine = (function() {
       // ── 策略訊號執行（warm-up 後）──────────────────────────
       var sigIdx = i; // 訊號永遠用 today（不管 execType，訊號都是今天）
 
-      if (sigIdx >= WARMUP) {
+      if (sigIdx >= warmup) {
         var leScore = sigs.longEntry[sigIdx];
         var lxScore = sigs.longExit[sigIdx];
         var seScore = sigs.shortEntry[sigIdx];
         var sxScore = sigs.shortExit[sigIdx];
+        if (!pf.position && (leScore >= threshold || (shortEnabled && seScore >= threshold))) diag.entrySignals++;
+        if (pf.position && ((pf.position.side === 'long' && lxScore >= threshold) || (pf.position.side === 'short' && sxScore >= threshold))) diag.exitSignals++;
 
         if (execType === 'close') {
           // 今日收盤執行
           if (!pf.position) {
             if (leScore >= threshold) {
               var base = posBase === 'equity' ? portfolioEquity(pf) : capital;
-              var lots = Math.floor(base * posSizePct / (execPrice * 1000));
+              var lots = lotsFor(base, execPrice, buyFeeRate);
               portfolioEnterLong(pf, lots, execPrice, date, buyFeeRate);
+              if (!pf.position) noteReject(execPrice, buyFeeRate);
               if (pf.position) trades.push({ type: 'entry', side: 'long', date: date, price: execPrice, qty: lots, reason: 'strategy', score: leScore });
             } else if (shortEnabled && seScore >= threshold) {
               var base = posBase === 'equity' ? portfolioEquity(pf) : capital;
-              var lots = Math.floor(base * posSizePct / (execPrice * 1000));
+              var lots = lotsFor(base, execPrice, buyFeeRate);
               portfolioEnterShort(pf, lots, execPrice, date, buyFeeRate);
+              if (!pf.position) noteReject(execPrice, buyFeeRate);
               if (pf.position) trades.push({ type: 'entry', side: 'short', date: date, price: execPrice, qty: lots, reason: 'strategy', score: seScore });
             }
           } else if (pf.position.side === 'long' && lxScore >= threshold) {
@@ -926,7 +952,9 @@ var ExecutionEngine = (function() {
       if (isNaN(equity[i])) equity[i] = i > 0 ? equity[i-1] : capital;
     }
 
-    return { equity, trades, finalPortfolio: pf };
+    diag.pendingAtEnd = !!(pendingLongEntry || pendingShortEntry || pendingLongExit || pendingShortExit);
+    diag.openAtEnd = !!pf.position;
+    return { equity, trades, finalPortfolio: pf, diag: diag };
   }
 
   return { run };
@@ -1166,6 +1194,7 @@ function runBacktestEngine(data, config) {
     equity:   Array.from(result.equity),
     trades:   result.trades,
     metrics:  metrics,
+    diag:     result.diag,
     annual:   metrics.annual,
   };
 }

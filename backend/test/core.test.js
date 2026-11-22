@@ -237,3 +237,120 @@ test("掃描：近期有官方分割的股票，技術面評分不得被假崩�
   U._test_clear(); const noList = await runScan(srcWith({ getHistory: splitSrc.getHistory, getSplitMap: async () => { throw new Error("down"); } }), { mode: "volume", limit: 30 });
   assert.ok(noList.stocks.find((s) => s.code === code));
 });
+
+// ── 2026-11-17 獨立實測問題的回歸測試 ──
+const R = require("../src/report");
+test("報價合併：不同日期的欄位不得混成同一筆（前一日成交金額配上當日價格）", async () => {
+  const U = require("../src/util"); U._test_clear();
+  const snap = await demo.getMarketSnapshot(), row = snap.stocks.get("1301"), h = await demo.getHistory("1301", "2000-01-01"), last = h.dates[h.dates.length - 1];
+  // 快照停在前一交易日（成交金額 180 億），即時報價已是當日
+  const older = Object.assign({}, row, { date: h.dates[h.dates.length - 2], value: 18e9, price: 76.6 });
+  const live = { code: "1301", name: "台塑", market: "上市", price: 69, prevClose: 76.6, change: -7.6, changePct: -9.92, open: 70, high: 71, low: 69, volume: 152791, date: last, time: last + " 13:30:00", realtime: false };
+  const a = await analyzeFn(srcWith({ getMarketSnapshot: async () => ({ stocks: new Map([...snap.stocks].map(([k, v]) => [k, k === "1301" ? older : v])) }), getQuote: async () => live }), "1301");
+  assert.strictEqual(a.quote.price, 69); assert.strictEqual(a.quote.date, last);
+  assert.strictEqual(a.quote.value, null, "前一日的成交金額不得當成當日金額"); assert.ok(/尚未取得/.test(a.text));
+  assert.ok(a.quote.staleSources.some((x) => x.date === older.date));
+  // 快照與即時報價同一天：成交金額可用，且標示來源與日期
+  U._test_clear(); const same = Object.assign({}, row, { date: last, value: 10.879e9 });
+  const b = await analyzeFn(srcWith({ getMarketSnapshot: async () => ({ stocks: new Map([...snap.stocks].map(([k, v]) => [k, k === "1301" ? same : v])) }), getQuote: async () => live }), "1301");
+  assert.strictEqual(b.quote.value, 10.879e9); assert.ok(/OpenAPI/.test(b.quote.valueSource));
+  // 沒有即時報價、快照比日 K 舊：以日 K 為準，報價與指標的現價一致
+  U._test_clear(); const c = await analyzeFn(srcWith({ getQuote: async () => null, getMarketSnapshot: async () => ({ stocks: new Map([...snap.stocks].map(([k, v]) => [k, k === "1301" ? older : v])) }) }), "1301");
+  assert.strictEqual(c.quote.price, h.closes[h.closes.length - 1]); assert.strictEqual(c.indicators.close, c.quote.price);
+});
+test("一年報酬全站同一口徑（250 個交易日），並標示起訖日", async () => {
+  const U = require("../src/util"); U._test_clear();
+  for (const code of ["2330", "0050"]) {
+    const a = await analyzeFn(demo, code), r = a.quant.rs.find((x) => x.k === 250);
+    assert.ok(r.from && r.to && r.days === 250); assert.strictEqual(a.indicators.ret250 !== undefined, true);
+    assert.ok(Math.abs(a.indicators.ret250 - r.ret) < 0.01, "指標與多週期績效的一年報酬必須相同");
+    for (const l of a.text.split("\n").filter((x) => /近 250 個交易日報酬/.test(x))) assert.ok(l.includes(pc2(r.ret)), l);
+    assert.ok(!/近一年報酬/.test(a.text), "不得再出現未定義期間的「近一年報酬」");
+  }
+});
+const pc2 = (v) => (v > 0 ? "+" : "") + Number(v).toFixed(2) + "%";
+test("公司行動：績效期間內有無法解釋的跳動時不計算，也不產生相對強弱", () => {
+  const h = flat(300, (i) => (i < 200 ? 100 : 25)), rs = Q.relStrength(h, null, null, [{ date: h.dates[200], movePct: -75 }]);
+  const y = rs.find((x) => x.k === 250); assert.strictEqual(y.ret, null); assert.strictEqual(y.excess, null); assert.ok(/無法可靠計算/.test(y.note));
+  assert.ok(rs.find((x) => x.k === 20).ret !== null, "不含跳動的短期間照常計算");
+});
+test("支撐與壓力方向：高於現價的均線不得寫成「向下看是否守住」", async () => {
+  const U = require("../src/util");
+  for (const code of (await demo.getMarketSnapshot()).stocks.keys()) {
+    U._test_clear(); const a = await analyzeFn(demo, code), P = a.indicators.close, l = a.text.split("\n").find((x) => x.startsWith("【觀察重點】"));
+    const down = l.match(/向下看 ([\d,.]+)/), up = l.match(/向上看 ([\d,.]+)/), n = (x) => +x.replace(/,/g, "");
+    if (down) assert.ok(n(down[1]) < P, `${code}：向下看 ${down[1]} 應低於現價 ${P}`); if (up) assert.ok(n(up[1]) > P, `${code}：向上看 ${up[1]} 應高於現價 ${P}`);
+    if (a.indicators.ma5 > P) assert.ok(/需要收復的壓力/.test(l), code + "：MA5 在現價之上時應說明是壓力");
+  }
+});
+test("趨勢模板：逐項結果、符合數與結論一致；關鍵條件未過不得稱為成立", async () => {
+  const U = require("../src/util");
+  for (const code of (await demo.getMarketSnapshot()).stocks.keys()) {
+    U._test_clear(); const a = await analyzeFn(demo, code), tr = a.quant.trend; if (!tr) continue;
+    const sec = a.text.split("=== 趨勢結構檢核\n")[1].split("\n\n=== ")[0];
+    if (tr.passed === 8) assert.ok(/八項全部符合/.test(sec)); else assert.ok(!/八項全部符合|結構完整/.test(sec), code + " 未全數符合卻稱完整");
+    if (tr.checks.slice(0, 3).some((c) => c.pass === false)) assert.ok(/關鍵條件未成立/.test(sec) && !/大致成立/.test(sec), code);
+  }
+});
+test("條件四態：任一子條件未符合即未符合，不因另一項缺值變成未知", () => {
+  assert.strictEqual(R.andState(false, null), false); assert.strictEqual(R.andState(true, null), null);
+  assert.strictEqual(R.andState(true, true), true); assert.strictEqual(R.andState("na", true), "na"); assert.strictEqual(R.andState("na", false), false);
+});
+test("類別計票：高度相關的價格指標不得重複計票壓過基本面與籌碼（反例）", () => {
+  // 舊規則逐項計票：價格 4 項＋動能 2 項＝6 多，基本面 2 項＋籌碼 1 項＝3 空 → 淨 +3 → 判為「偏多」
+  const groups = [["價格趨勢", [[1, "站上月線"], [1, "站上季線"], [1, "多頭排列"], [1, "趨勢模板"]]], ["動能", [[1, "MACD"], [1, "KD"]]], ["基本面", [[-1, "營收年減"], [-1, "EPS 年減"]]], ["籌碼", [[-1, "法人賣超"]]]];
+  const flatNet = groups.reduce((t, g) => t + g[1].reduce((u, x) => u + x[0], 0), 0); assert.strictEqual(flatNet, 3);
+  const v = R.voteCategories(groups); assert.strictEqual(v.bull, 2); assert.strictEqual(v.bear, 2); assert.strictEqual(v.conflict, true); assert.strictEqual(v.stance, "中性");
+  assert.strictEqual(R.voteCategories([["價格趨勢", [[1, "a"]]], ["籌碼", [[1, "b"]]], ["基本面", [[-1, "c"]]]]).stance, "中性");
+  assert.strictEqual(R.voteCategories([["價格趨勢", [[1, "a"]]], ["籌碼", [[1, "b"]]], ["基本面", [[1, "c"]]], ["大盤", [[-1, "d"]]]]).stance, "偏多");
+});
+test("CAN SLIM：本季虧損是「未符合」、負基期是「不適用」、ROE 未達門檻即「未符合」", async () => {
+  const U = require("../src/util"), base = await demo.getFinancials("2330");
+  const run = async (lastEps, prevYearEps, roeLow) => { U._test_clear(); const q = base.map((x) => Object.assign({}, x)); q[q.length - 1].eps = lastEps; q[q.length - 5].eps = prevYearEps;
+    if (roeLow) for (const x of q) x.netInc = Math.abs(x.netInc) * 0.01;
+    const a = await analyzeFn(srcWith({ getFinancials: async () => q }), "2330"); const rows = a.text.split("\n"); return { C: rows.find((l) => l.startsWith("| C 當季獲利")), A: rows.find((l) => l.startsWith("| A 年度獲利")), a }; };
+  let r = await run(-0.33, 1.2); assert.ok(/虧損/.test(r.C) && /未符合/.test(r.C), r.C); assert.ok(!/無財報資料/.test(r.C));
+  r = await run(0.93, -0.12); assert.ok(/不適用/.test(r.C), r.C); assert.ok(/比較基期/.test(r.a.fundamentals.epsYoYNote));
+  r = await run(5, 1, true); assert.ok(/未符合/.test(r.A), "ROE 低於門檻時整項應為未符合：" + r.A);
+});
+test("歷史訊號統計：用語、成熟樣本與目前狀態", async () => {
+  const U = require("../src/util"); U._test_clear(); const a = await analyzeFn(demo, "2330"), sec = a.text.split("=== 歷史訊號統計\n")[1].split("\n\n=== ")[0];
+  assert.ok(!/上漲機率/.test(a.text), "不得使用「上漲機率」"); assert.ok(/歷史上漲比例/.test(sec) && /毛報酬/.test(sec) && /樣本外驗證/.test(sec));
+  assert.ok(!/任何訊號都只是把機率/.test(a.text)); assert.ok(!/超出這個範圍代表/.test(a.text));
+  for (const e of a.quant.events.events) { assert.ok(Array.isArray(e.pending) && e.pending.length === 3); assert.ok(e.pending[0] <= e.pending[2]); }
+});
+test("評分覆蓋：ETF 的不適用項目不計分、不縮小分母，分數本身不變", async () => {
+  const U = require("../src/util"); U._test_clear(); const e = await analyzeFn(demo, "0050"), s = await analyzeFn(demo, "2330");
+  assert.strictEqual(e.scored.applicable, 60); assert.ok(e.scored.naKeys.includes("rev_yoy")); assert.ok(e.scored.known <= 60);
+  assert.strictEqual(s.scored.applicable, 100); assert.strictEqual(s.scored.naKeys.length, 0);
+  const d = e.scored.detail; assert.strictEqual(e.scored.score, d._fund + d._tech + d._vol + d._chip + d._margin + d._theme);
+});
+test("部位試算：停損價取到合法升降單位", () => {
+  const { roundTick } = require("../src/scoring");
+  assert.strictEqual(roundTick(2087.25, false, -1), 2085); assert.strictEqual(roundTick(81.69, false, -1), 81.6); assert.strictEqual(roundTick(31.04, false, -1), 31);
+  const z = Q.sizing(2170, 78.97, [], 1000000, 1, (x) => roundTick(x, false, -1)); for (const r of z) assert.strictEqual(r.stop % 5, 0, "千元以上股票升降單位為 5 元");
+});
+test("掃描回應附上資料日期與排序條件", async () => {
+  const U = require("../src/util"); U._test_clear();
+  for (const mode of ["volume", "momentum", "sector", "disposition"]) { const r = await runScan(demo, { mode, limit: 5 }); assert.ok(r.asOf && r.basis, mode); }
+});
+// 回測引擎在瀏覽器執行；以 vm 載入同一份檔案測試
+const vmLoad = () => { const vm = require("vm"), fs = require("fs"), ctx = { console, localStorage: { getItem: () => null }, Math, Date, JSON, Array, Object, Number, String, isNaN, isFinite, parseInt, parseFloat, Infinity, NaN, Error, Float64Array, Map, Set };
+  vm.createContext(ctx); vm.runInContext(fs.readFileSync(require("path").join(__dirname, "../../frontend/js/bt-core.js"), "utf8") + ";this.run=runBacktestEngine;", ctx); return ctx; };
+test("回測：只選一年時仍可交易（舊版固定暖機 250 根導致零交易）；資金不足一張時明確說明", async () => {
+  const B = vmLoad(), h = await demo.getHistory("2603", "2000-01-01"), k = h.dates.length - 242, d = { code: "2603" };
+  for (const f of ["dates", "opens", "highs", "lows", "closes", "volumes"]) d[f] = h[f].slice(k);
+  const cfg = (cap) => ({ code: "2603", capital: cap, execType: "open", positionBase: "equity", posSize: 100, stopLoss: 8, stopProfit: 25, scoreThreshold: 1, longEntry: [{ id: "ma_golden", params: { fast: 5, slow: 20 } }], longExit: [{ id: "ma_death", params: { fast: 5, slow: 20 } }], shortEnabled: false, shortEntry: [], shortExit: [] });
+  const r = B.run(JSON.parse(JSON.stringify(d)), cfg(5000000));
+  assert.strictEqual(r.diag.warmup, 21); assert.ok(r.diag.entrySignals > 0); assert.ok(r.metrics.tradeCount > 0, "一年區間應有交易");
+  const first = r.trades[0], i = d.dates.indexOf(first.date); assert.strictEqual(first.price, d.opens[i], "隔日開盤模式以開盤價成交");
+  const poor = B.run(JSON.parse(JSON.stringify(d)), cfg(1000)); assert.strictEqual(poor.metrics.tradeCount, 0); assert.ok(poor.diag.rejectedCash > 0 && poor.diag.minCashNeeded > 1000);
+  // 舊格式（只有策略代號、沒有參數）維持舊的 250 根暖機
+  assert.strictEqual(B.run(JSON.parse(JSON.stringify(d)), Object.assign(cfg(5000000), { longEntry: ["ma_golden"], longExit: ["ma_death"] })).diag.warmup, 251);
+});
+test("回測：買進張數把手續費算進去，不會因股款＋手續費超過現金而靜默拒絕", async () => {
+  const B = vmLoad(), d = flat(80, (i) => (i < 40 ? 100 : 100 + (i - 39))); d.code = "T"; d.opens = d.closes.slice(); d.highs = d.closes.slice(); d.lows = d.closes.slice();
+  const r = B.run(JSON.parse(JSON.stringify(d)), { code: "T", capital: 100000, execType: "close", positionBase: "equity", posSize: 100, scoreThreshold: 1, longEntry: [{ id: "price_above_ma", params: { period: 20 } }], longExit: [], shortEnabled: false, shortEntry: [], shortExit: [] });
+  // 股價 100 元、本金 10 萬：不含手續費會算成 1 張（10 萬元＋142.5 元手續費 > 10 萬 → 被拒）；含手續費則正確算成 0 張並列入資金不足
+  assert.strictEqual(r.trades.filter((t) => t.type === "entry").length, 0); assert.ok(r.diag.rejectedCash > 0);
+});

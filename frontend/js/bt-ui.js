@@ -563,8 +563,26 @@ function sc(label,val,cls) {
   return '<div class="stat-card"><div class="stat-label">'+label+'</div><div class="stat-val '+cls+'">'+val+'</div></div>';
 }
 
+// 無虧損交易時獲利因子沒有定義（引擎以 999 代表），不顯示成數字
+function pfTxt(m) { return m.profitFactor >= 999 ? '無虧損交易' : fmtN(m.profitFactor); }
+// 回測診斷：訊號數、未成交原因、暖機期與成交時點的限制
+function diagHTML(dg, m, cfg) {
+  if (!dg) return '';
+  var lines = [];
+  lines.push('前 ' + (dg.warmup) + ' 根 K 線用於指標暖機、不交易；可交易期間自 ' + (dg.tradeFrom || '—') + ' 起。');
+  lines.push('進場訊號 ' + dg.entrySignals + ' 次、出場訊號 ' + dg.exitSignals + ' 次；實際完成 ' + m.tradeCount + ' 筆交易。');
+  if (dg.rejected) lines.push('有 ' + dg.rejected + ' 次進場訊號未成交' + (dg.rejectedCash ? '，其中 ' + dg.rejectedCash + ' 次是資金不足以買進一張（含手續費約需 ' + Number(dg.minCashNeeded).toLocaleString() + ' 元）。本系統以整張交易，未模擬零股。' : '。'));
+  if (!dg.entrySignals && dg.bars <= dg.warmup) lines.push('資料長度（' + dg.bars + ' 根）不足暖機期，請擴大回測區間。');
+  else if (!dg.entrySignals) lines.push('可交易期間內沒有出現符合條件的進場訊號（共振門檻 ' + (cfg.scoreThreshold || 1) + ' 分）。');
+  if (dg.openAtEnd) lines.push('回測結束時仍有未平倉部位，未計入已完成交易的統計。');
+  if (dg.pendingAtEnd) lines.push('最後一天的訊號需在下一個交易日開盤執行，資料已結束，未成交。');
+  if (cfg.execType === 'close') lines.push('「當日收盤成交」假設訊號出現當天就能用收盤價成交；但收盤確認的訊號要收盤後才知道，實務上做不到，結果會偏樂觀。較保守的設定是「隔日開盤」。');
+  return '<div class="signal-box" style="margin-top:8px"><div class="signal-title">回測診斷</div><div style="font-size:11px;line-height:1.8;color:var(--text2)">' + lines.join('<br>') + '</div></div>';
+}
+
 // ── 顯示結果 ─────────────────────────────────────────────────
 function showResults(result, data) {
+  var NT = !(result.metrics && result.metrics.tradeCount > 0), NA = '不適用（無交易）';
   var m = result.metrics;
   window._lastResult = result;
   window._lastData   = data;
@@ -599,10 +617,11 @@ function showResults(result, data) {
     +sc('夏普比率',  fmtN(m.sharpe),     m.sharpe>=1?'pos':m.sharpe>=0?'neu':'neg')
     +sc('最大回撤',  fmtP(-m.maxDD),     'neg')
     +sc('交易次數',  m.tradeCount+'次',  'neu')
-    +sc('勝率',      (m.winRate*100).toFixed(1)+'%', m.winRate>=0.5?'pos':'neg')
-    +sc('獲利因子',  fmtN(m.profitFactor), m.profitFactor>=1.5?'pos':m.profitFactor>=1?'neu':'neg')
+    +sc('勝率',      NT ? NA : (m.winRate*100).toFixed(1)+'%', NT ? 'neu' : m.winRate>=0.5?'pos':'neg')
+    +sc('獲利因子',  NT ? NA : pfTxt(m), NT ? 'neu' : m.profitFactor>=1.5?'pos':m.profitFactor>=1?'neu':'neg')
     +sc('最終權益',  'NT$'+Math.round(m.finalEquity).toLocaleString(), m.finalEquity>=m.initCapital?'pos':'neg')
     +'</div>'
+    +diagHTML(result.diag, m, cfg)
     +'<div class="chart-wrap"><div class="chart-title">淨值曲線（▲進場 ▽出場）</div>'
     +'<canvas id="equityChart" style="display:block"></canvas></div>'
     +'</div>';
@@ -617,13 +636,13 @@ function showResults(result, data) {
     +sc('索提諾比率', fmtN(m.sortino),    m.sortino>=1?'pos':'neu')
     +sc('卡瑪比率',   fmtN(m.calmar),     m.calmar>=0.5?'pos':'neu')
     +sc('最大回撤',   fmtP(-m.maxDD),     'neg')
-    +sc('獲利因子',   fmtN(m.profitFactor), m.profitFactor>=1.5?'pos':'neu')
-    +sc('期望值(元)', fmtM(m.expectancy), m.expectancy>0?'pos':'neg')
-    +sc('勝率',       (m.winRate*100).toFixed(1)+'%', m.winRate>=0.5?'pos':'neg')
-    +sc('平均獲利',   fmtM(m.avgWin)+'元', 'pos')
-    +sc('平均虧損',   fmtM(m.avgLoss)+'元','neg')
-    +sc('最大連勝',   m.maxWinStreak+'次','pos')
-    +sc('最大連敗',   m.maxLoseStreak+'次','neg')
+    +sc('獲利因子',   NT ? NA : pfTxt(m), NT ? 'neu' : m.profitFactor>=1.5?'pos':'neu')
+    +sc('期望值(元)', NT ? NA : fmtM(m.expectancy), NT ? 'neu' : m.expectancy>0?'pos':'neg')
+    +sc('勝率',       NT ? NA : (m.winRate*100).toFixed(1)+'%', NT ? 'neu' : m.winRate>=0.5?'pos':'neg')
+    +sc('平均獲利',   NT ? NA : fmtM(m.avgWin)+'元', 'pos')
+    +sc('平均虧損',   NT ? NA : fmtM(m.avgLoss)+'元','neg')
+    +sc('最大連勝',   NT ? NA : m.maxWinStreak+'次','pos')
+    +sc('最大連敗',   NT ? NA : m.maxLoseStreak+'次','neg')
     +sc('復原因子',   fmtN(m.recoveryFactor), m.recoveryFactor>=1?'pos':'neu')
     +sc('持倉曝光率', (m.exposure*100).toFixed(1)+'%','neu')
     +sc('年化波動率', m.annVolatility!=null?fmtP(m.annVolatility):'—','neu')
@@ -793,7 +812,7 @@ function renderOptResults(results) {
           +'<td style="color:var(--'+(r.metrics.cagr>=0?'green':'red')+')">'  +fmtP(r.metrics.cagr)+'</td>'
           +'<td>'+fmtN(r.metrics.sharpe)+'</td><td>'+fmtN(r.metrics.sortino)+'</td><td>'+fmtN(r.metrics.calmar)+'</td>'
           +'<td style="color:var(--red)">'+fmtP(-r.metrics.maxDD)+'</td>'
-          +'<td>'+(r.metrics.winRate*100).toFixed(1)+'%</td><td>'+r.metrics.tradeCount+'</td></tr>';
+          +'<td>'+(r.metrics.tradeCount>0?(r.metrics.winRate*100).toFixed(1)+'%':'—')+'</td><td>'+r.metrics.tradeCount+'</td></tr>';
       }).join('')
     +'</tbody></table></div>';
   document.getElementById('optStatus').textContent='優化完成，共 '+results.length+' 組';
@@ -861,7 +880,7 @@ function renderBatchResults(results) {
           +'<td style="color:var(--'+(r.metrics.cagr>=0?'green':'red')+')">'  +fmtP(r.metrics.cagr)+'</td>'
           +'<td>'+fmtN(r.metrics.sharpe)+'</td><td>'+fmtN(r.metrics.sortino)+'</td>'
           +'<td style="color:var(--red)">'+fmtP(-r.metrics.maxDD)+'</td>'
-          +'<td>'+(r.metrics.winRate*100).toFixed(1)+'%</td><td>'+r.metrics.tradeCount+'</td></tr>';
+          +'<td>'+(r.metrics.tradeCount>0?(r.metrics.winRate*100).toFixed(1)+'%':'—')+'</td><td>'+r.metrics.tradeCount+'</td></tr>';
       }).join('')
     +'</tbody></table></div>';
   document.getElementById('batchStatus').textContent='批量優化完成，共 '+results.length+' 組';

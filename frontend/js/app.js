@@ -167,6 +167,7 @@ function toggleScan() {
   document.getElementById("scanOpenBtn").textContent = scanOpen ? "關閉掃描" : "熱門掃描";
 }
 function setMode(m) {
+  if (scanMode !== m) { var sr = document.getElementById("scanResult"); if (sr && sr.innerHTML) sr.innerHTML = '<div class="scan-msg">已切換掃描模式，請按「開始掃描」取得此模式的結果。</div>'; }
   scanMode = m;
   document.getElementById("modeVol").classList.toggle("on", m === "volume");
   document.getElementById("modeChg").classList.toggle("on", m === "change");
@@ -226,8 +227,12 @@ function runScan() {
       }
       showDemoBanner(data.demo);
       var verTag = data._v ? ' <span style="opacity:.4">(' + esc(data._v) + ')</span>' : '';
-      var prefix = '<div style="font-size:10px;color:var(--text3);text-align:right;margin-bottom:4px">'
-        + (data.cached ? '⚡ 快取結果（3分鐘內有效）' : '') + verTag + '</div>';
+      var MODE = {volume:"成交量排行", change:"漲幅排行", drop:"跌幅排行", momentum:"動能排行", sector:"族群熱度", limitup:"鎖漲停", disposition:"處置股"};
+      var prefix = '<div class="scan-meta"><b>' + esc(MODE[scanMode] || scanMode) + '</b>'
+        + '｜資料日期 ' + esc(data.asOf || "—") + (data.asOfOther && data.asOfOther.length ? '（部分標的為 ' + esc(data.asOfOther.join("、")) + '）' : '')
+        + (data.basis ? '｜' + esc(data.basis) : '')
+        + (data.cached ? '｜⚡ 快取結果（3 分鐘內有效）' : '') + verTag
+        + (data.scoreNote && scanMode !== "sector" ? '<br>' + esc(data.scoreNote) : '') + '</div>';
       if (scanMode === "sector") {
         renderSectorScan(data, prefix);
       } else {
@@ -686,7 +691,8 @@ function kpiHTML(d) {
     ["外資持股", hold.ratio ? num(hold.ratio, 2) + "%" : "—", hold.ratio && isFinite(hold.ratio20) ? "20 日 " + sg(hold.ratio - hold.ratio20, 2, " 個百分點") : ""],
     ["日均波幅 ATR", r.atrPct ? num(r.atrPct, 2) + "%" : "—", r.atr14 ? "約 " + num(r.atr14) + " 元" : ""],
     ["Beta", num(r.beta), r.vol60 ? "年化波動 " + num(r.vol60, 1) + "%" : ""],
-    ["52 週位置", ind.pos240 !== null && ind.pos240 !== undefined ? num(ind.pos240, 0) + "%" : "—", ind.lo240 ? num(ind.lo240) + " ~ " + num(ind.hi240) : ""]
+    (function() { var pz = ind.pos250 !== undefined ? ind.pos250 : ind.pos240, lo = ind.lo250 !== undefined ? ind.lo250 : ind.lo240, hi = ind.hi250 !== undefined ? ind.hi250 : ind.hi240;
+      return ["52 週位置", pz !== null && pz !== undefined ? num(pz, 0) + "%" : "—", lo ? num(lo) + " ~ " + num(hi) : ""]; })()
   ];
   return '<div class="kpi-row">' + items.map(function(k) { return '<div class="kpi"><div class="kpi-l">' + k[0] + '</div><div class="kpi-v">' + esc(k[1]) + '</div><div class="kpi-s">' + esc(k[2]) + '</div></div>'; }).join("") + '</div>';
 }
@@ -764,7 +770,7 @@ function renderReport(code, text, scored, data, isAI) {
       { key:"theme_support",label:"題材支撐" },
     ];
     var detailRows = detailItems.map(function(item) {
-      var val = String(d[item.key] || "—");
+      var val = (scored.naKeys || []).indexOf(item.key) >= 0 ? "不適用" : String(d[item.key] || "—");
       var plus = val.startsWith("+");
       return '<div style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid var(--border);font-size:11px">'
         + '<span style="color:var(--text2)">' + item.label + '</span>'
@@ -772,10 +778,12 @@ function renderReport(code, text, scored, data, isAI) {
         + '</div>';
     }).join("");
 
+    var naNote = (scored.naKeys && scored.naKeys.length) ? '<div class="note" style="text-align:left;margin-top:6px">ETF 不適用基本面、融資與題材項目：這些項目不計分，也不從 100 分的分母扣除；不同類型標的的分數不宜直接比較。</div>' : "";
     scoreCard = '<div style="background:var(--bg3);border:1px solid ' + grColor + ';border-radius:8px;padding:14px 16px;margin-bottom:16px">'
       // 標題列
       + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">'
-      + '<span style="font-family:IBM Plex Mono,monospace;font-size:10px;color:var(--text3);letter-spacing:.08em">綜合評分</span>'
+      + '<span style="font-family:IBM Plex Mono,monospace;font-size:10px;color:var(--text3);letter-spacing:.08em">綜合評分'
+      + (scored.applicable ? '　<span style="letter-spacing:0">適用滿分 ' + esc(scored.applicable) + '｜資料覆蓋 ' + esc(scored.known) + ' / ' + esc(scored.applicable) + '</span>' : '') + '</span>'
       + '<span style="font-size:11px;font-weight:600;color:' + grColor + '">' + esc(gr) + '</span>'
       + '</div>'
       // 大分數 + 進度條
@@ -789,7 +797,7 @@ function renderReport(code, text, scored, data, isAI) {
       + '<details style="margin-top:4px">'
       + '<summary style="cursor:pointer;font-size:10px;color:var(--text3);font-family:IBM Plex Mono,monospace;letter-spacing:.06em;outline:none">▶ 細項評分明細</summary>'
       + '<div style="margin-top:8px;padding:8px;background:var(--bg4);border-radius:4px">' + detailRows + '</div>'
-      + '</details>'
+      + '</details>' + naNote
       + '</div>';
   }
 
@@ -874,7 +882,11 @@ function renderReport(code, text, scored, data, isAI) {
     + '<div><div class="hero-price ' + chgCls + '">' + esc(price) + '</div><div class="hero-chg ' + chgCls + '">' + esc(chgText) + '</div></div>'
     + '</div>'
     + '<div class="score-bars">'
-    + '<div class="score-bar"><div class="bar-label">多空判斷</div><div class="bar-track"><div class="bar-fill ' + barType + '" style="width:' + barPct + '"></div></div><div class="bar-vals"><span style="color:var(--red)">偏空</span><span>' + dirText + '</span><span style="color:var(--green)">偏多</span></div></div>'
+    + (data.stanceDetail && data.stanceDetail.total
+      ? '<div class="score-bar"><div class="bar-label">多空類別計數（不是機率）</div><div class="bar-track" style="display:flex">'
+        + '<div class="bar-fill bull" style="width:' + (data.stanceDetail.bull / data.stanceDetail.total * 100) + '%"></div><div class="bar-fill neutral" style="width:' + (data.stanceDetail.neutral / data.stanceDetail.total * 100) + '%;opacity:.35"></div><div class="bar-fill bear" style="width:' + (data.stanceDetail.bear / data.stanceDetail.total * 100) + '%"></div></div>'
+        + '<div class="bar-vals"><span style="color:var(--green)">偏多 ' + data.stanceDetail.bull + ' 類</span><span>' + dirText + (data.stanceDetail.conflict ? '（分歧）' : '') + '</span><span style="color:var(--red)">偏空 ' + data.stanceDetail.bear + ' 類</span></div></div>'
+      : '<div class="score-bar"><div class="bar-label">多空判斷</div><div class="bar-track"><div class="bar-fill ' + barType + '" style="width:' + barPct + '"></div></div><div class="bar-vals"><span style="color:var(--red)">偏空</span><span>' + dirText + '</span><span style="color:var(--green)">偏多</span></div></div>')
     + '<div class="score-bar"><div class="bar-label">資料完整度</div><div class="bar-track"><div class="bar-fill neutral" style="width:' + covPct + '%"></div></div><div class="bar-vals"><span></span><span>' + (cov ? cov.got + ' / ' + cov.total + ' 個資料源' : '') + '</span><span></span></div></div>'
     + '</div>'
     + horizonHTML(data.horizons)

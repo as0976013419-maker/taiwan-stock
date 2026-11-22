@@ -9,6 +9,13 @@ const tickOf = (p, etf) => etf ? (p < 50 ? 0.01 : 0.05) : (p < 10 ? 0.01 : p < 5
 /** 漲停價：前收 ×1.10，向下取到升降單位 */
 function limitUpPrice(prev, etf) { const raw = prev * 1.1, t = tickOf(raw, etf); return round(Math.floor(raw / t + 1e-9) * t, 2); }
 
+/** 價格取到合法升降單位；dir=-1 向下、1 向上（停損價向下取，使停損距離不被低估） */
+function roundTick(p, etf, dir = -1) { if (!(p > 0)) return null; const t = tickOf(p, etf); return round((dir < 0 ? Math.floor(p / t + 1e-9) : Math.ceil(p / t - 1e-9)) * t, 2); }
+// 各細項滿分（加總 100）。用來顯示「適用滿分」與「資料覆蓋」，不參與計分。
+const ITEM_MAX = { rev_yoy: 8, eps_growth: 5, roe: 4, margin_stable: 3, above_ma20: 5, ma20_up: 5, ma60_up: 5, ma_bull: 5, breakout: 5, up_vol: 5, down_vol: 5, vol_above_avg: 5,
+  foreign_buy: 6, site_buy: 6, inst_total: 4, big_player: 4, margin_health: 5, margin_decrease: 5, theme_main: 6, theme_support: 4 };
+const ETF_NA = ["rev_yoy", "eps_growth", "roe", "margin_stable", "margin_health", "margin_decrease", "theme_main", "theme_support"];
+
 function gradeOf(score) {
   if (score >= 80) return { grade: "強勢觀察", gradeColor: "#ef4444" };
   if (score >= 65) return { grade: "可試單", gradeColor: "#f59e0b" };
@@ -98,7 +105,11 @@ function scoreStock(x) {
 
   const score = clamp(Math.round(fund + tech + vol + chip + margin + theme), 0, 100);
   Object.assign(d, { _fund: fund, _tech: tech, _vol: vol, _chip: chip, _margin: margin, _theme: theme });
-  return Object.assign({ score, detail: d, roe: round(roe, 1), etf }, gradeOf(score));
+  // 「不適用」（ETF 沒有營收、財報、信用交易與族群）與「資料不足」分開計：兩者都不計分，也都不從分母扣除
+  const naKeys = etf ? ETF_NA : [], missingKeys = Object.keys(ITEM_MAX).filter((k) => !naKeys.includes(k) && d[k] === "—");
+  const applicable = Object.keys(ITEM_MAX).filter((k) => !naKeys.includes(k)).reduce((t, k) => t + ITEM_MAX[k], 0);
+  const known = applicable - missingKeys.reduce((t, k) => t + ITEM_MAX[k], 0);
+  return Object.assign({ score, detail: d, roe: round(roe, 1), etf, applicable, known, naKeys, missingKeys }, gradeOf(score));
 }
 
 /** 掃描表格用的一句話（描述現況與觀察條件，不是買賣指令） */
@@ -137,4 +148,4 @@ function momentumOf(snap, ind, ctx = {}) {
   return { momentumScore: score, momentumTags: tags };
 }
 
-module.exports = { VERSION, scoreStock, suggestionOf, momentumOf, gradeOf, limitUpPrice };
+module.exports = { VERSION, scoreStock, suggestionOf, momentumOf, gradeOf, limitUpPrice, roundTick, ITEM_MAX };

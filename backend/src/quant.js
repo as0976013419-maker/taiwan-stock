@@ -83,15 +83,18 @@ function riskMetrics(hist, idx, priceHist) {
 }
 
 /** 多週期報酬與相對大盤的超額報酬 */
-function relStrength(hist, idx, total) {
+function relStrength(hist, idx, total, unexplained) {
+  const bad = (unexplained || []).map((x) => x.date);
   const { closes: c, dates: d } = hist, n = c.length, id = idx && idx.dates ? idx.dates : null, tc = total ? total.closes : null;
   // 指數資料可能比個股晚一天更新（盤中／剛收盤）：取「不晚於該日」的最近一根指數
   const at = (date) => { if (!id) return -1; let lo = 0, hi = id.length - 1, r = -1; while (lo <= hi) { const m = (lo + hi) >> 1; if (id[m] <= date) { r = m; lo = m + 1; } else hi = m - 1; } return r; };
   return [["1 週", 5], ["1 個月", 20], ["3 個月", 60], ["6 個月", 120], ["1 年", 250], ["3 年", 750]].map(([label, k]) => {
-    if (n <= k) return { label, k, ret: null, tr: null, idx: null, excess: null };
+    if (n <= k) return { label, k, ret: null, tr: null, idx: null, excess: null, note: `資料僅 ${n} 根，不足 ${k + 1} 根` };
+    const from = d[n - 1 - k], to = d[n - 1], hit = bad.filter((x) => x > from && x <= to);
+    if (hit.length) return { label, k, from, to, days: k, ret: null, tr: null, idx: null, excess: null, note: `期間內 ${hit[0]} 有超過漲跌幅限制、查無公告的價格跳動，無法可靠計算` };
     const ret = (c[n - 1] / c[n - 1 - k] - 1) * 100; let ir = null;
     const x = at(d[n - 1]), y = at(d[n - 1 - k]); if (x > 0 && y >= 0 && x > y) ir = (idx.closes[x] / idx.closes[y] - 1) * 100;
-    return { label, k, ret: round(ret), tr: tc ? round((tc[n - 1] / tc[n - 1 - k] - 1) * 100) : null, idx: round(ir), excess: ir === null ? null : round(ret - ir) };
+    return { label, k, from, to, days: k, ret: round(ret), tr: tc ? round((tc[n - 1] / tc[n - 1 - k] - 1) * 100) : null, idx: round(ir), excess: ir === null ? null : round(ret - ir), idxFrom: x > 0 ? id[y] : null, idxTo: x > 0 ? id[x] : null };
   });
 }
 
@@ -133,17 +136,18 @@ function eventStudy(hist) {
   const m5 = sma(c, 5), m20 = sma(c, 20), m60 = sma(c, 60), vm = sma(v, 20), R = rsi(c, 14), KD = kd(h, l, c, 9);
   const hiPrev = (i, k) => { let m = -Infinity; for (let j = i - k; j < i; j++) if (h[j] > m) m = h[j]; return m; };
   const EV = [
-    ["up20", "收盤由下往上站回 20 日均線", (i) => c[i - 1] <= m20[i - 1] && c[i] > m20[i]],
-    ["dn20", "收盤由上往下跌破 20 日均線", (i) => c[i - 1] >= m20[i - 1] && c[i] < m20[i]],
-    ["x520", "5 日均線上穿 20 日均線", (i) => m5[i - 1] <= m20[i - 1] && m5[i] > m20[i]],
-    ["brk20", "收盤創 20 日新高", (i) => c[i] > hiPrev(i, 20) && c[i - 1] <= hiPrev(i - 1, 20)],
-    ["brk60", "收盤創 60 日新高", (i) => c[i] > hiPrev(i, 60) && c[i - 1] <= hiPrev(i - 1, 60)],
-    ["volup", "成交量達均量 2 倍且收紅", (i) => vm[i] && v[i] >= 2 * vm[i] && c[i] > c[i - 1]],
-    ["voldn", "成交量達均量 2 倍且收黑", (i) => vm[i] && v[i] >= 2 * vm[i] && c[i] < c[i - 1]],
-    ["rsi30", "RSI(14) 跌破 30", (i) => R[i - 1] !== null && R[i - 1] >= 30 && R[i] < 30],
-    ["rsi70", "RSI(14) 升破 70", (i) => R[i - 1] !== null && R[i - 1] <= 70 && R[i] > 70],
-    ["kdlow", "KD 在 30 以下 K 上穿 D", (i) => KD.K[i - 1] !== null && KD.K[i - 1] <= KD.D[i - 1] && KD.K[i] > KD.D[i] && KD.K[i] < 30],
-    ["dev60", "股價低於 60 日均線 10% 以上", (i) => m60[i] && c[i] < m60[i] * 0.9 && !(c[i - 1] < m60[i - 1] * 0.9)],
+    // [代號, 名稱, 事件（當天發生）, 目前狀態（最新一根是否仍成立；null＝單日事件沒有持續狀態）]
+    ["up20", "收盤由下往上站回 20 日均線", (i) => c[i - 1] <= m20[i - 1] && c[i] > m20[i], (i) => c[i] > m20[i]],
+    ["dn20", "收盤由上往下跌破 20 日均線", (i) => c[i - 1] >= m20[i - 1] && c[i] < m20[i], (i) => c[i] < m20[i]],
+    ["x520", "5 日均線上穿 20 日均線", (i) => m5[i - 1] <= m20[i - 1] && m5[i] > m20[i], (i) => m5[i] > m20[i]],
+    ["brk20", "收盤創 20 日新高", (i) => c[i] > hiPrev(i, 20) && c[i - 1] <= hiPrev(i - 1, 20), null],
+    ["brk60", "收盤創 60 日新高", (i) => c[i] > hiPrev(i, 60) && c[i - 1] <= hiPrev(i - 1, 60), null],
+    ["volup", "成交量達均量 2 倍且收紅", (i) => vm[i] && v[i] >= 2 * vm[i] && c[i] > c[i - 1], null],
+    ["voldn", "成交量達均量 2 倍且收黑", (i) => vm[i] && v[i] >= 2 * vm[i] && c[i] < c[i - 1], null],
+    ["rsi30", "RSI(14) 跌破 30", (i) => R[i - 1] !== null && R[i - 1] >= 30 && R[i] < 30, (i) => R[i] < 30],
+    ["rsi70", "RSI(14) 升破 70", (i) => R[i - 1] !== null && R[i - 1] <= 70 && R[i] > 70, (i) => R[i] > 70],
+    ["kdlow", "KD 在 30 以下 K 上穿 D", (i) => KD.K[i - 1] !== null && KD.K[i - 1] <= KD.D[i - 1] && KD.K[i] > KD.D[i] && KD.K[i] < 30, (i) => KD.K[i] > KD.D[i]],
+    ["dev60", "股價低於 60 日均線 10% 以上", (i) => m60[i] && c[i] < m60[i] * 0.9 && !(c[i - 1] < m60[i - 1] * 0.9), (i) => m60[i] && c[i] < m60[i] * 0.9],
   ];
   const H = [5, 10, 20], start = 65, o = hist.opens, COST = 0.585; // 來回交易成本：手續費 0.1425%×2 ＋ 證交稅 0.3%
   // 進場價用「訊號隔日開盤」：訊號要到收盤才確定，當天收盤價實際上買不到（避免前視偏誤）
@@ -156,14 +160,16 @@ function eventStudy(hist) {
   };
   const all = []; for (let i = start; i < n; i++) all.push(i);
   const baseline = H.map((k) => stat(all, k));
-  const events = EV.map(([key, name, fn]) => {
+  const events = EV.map(([key, name, fn, stateFn]) => {
     const idxs = []; for (let i = start; i < n; i++) { try { if (fn(i)) idxs.push(i); } catch (e) { /* 指標尚未就緒 */ } }
     const last = idxs.length ? idxs[idxs.length - 1] : -1;
     const h = H.map((k, j) => { const x = stat(idxs, k), b = baseline[j];
       if (x.n && x.sd && x.indep >= 2) { x.excess = round(x.mean - b.mean); x.t = round((x.mean - b.mean) / (x.sd / Math.sqrt(x.indep))); x.net = round(x.mean - COST); }
       // 證據等級：獨立樣本 < 10 → 不足；|t| ≥ 2.9（對 33 組檢定做 Bonferroni 校正後約 5% 水準）→ 顯著；|t| ≥ 2 → 僅未校正下顯著；其餘 → 與基準無法區分
       x.grade = !x.n || x.indep < 10 ? "insufficient" : Math.abs(x.t) >= 2.9 ? "strong" : Math.abs(x.t) >= 2 ? "weak" : "none"; return x; });
-    return { key, name, count: idxs.length, active: last >= n - 3, lastDate: last >= 0 ? hist.dates[last] : null, h };
+    let stateNow = null; if (stateFn) { try { stateNow = !!stateFn(n - 1); } catch (e) { stateNow = null; } }
+    return { key, name, count: idxs.length, active: last >= n - 3, lastDate: last >= 0 ? hist.dates[last] : null, stateNow, h,
+      pending: H.map((k) => idxs.filter((i) => i + 1 + k >= n).length) }; // 尚未走完持有期、已排除的事件數
   });
   return { bars: n, years: round(n / 250, 1), horizons: H, baseline, events, cost: COST, tests: EV.length * H.length };
 }
@@ -175,9 +181,9 @@ function factors(hist) {
 }
 
 /** 部位規模試算：固定比例風險法（每筆交易最多虧損本金的 riskPct%） */
-function sizing(price, atr14, stops, capital = 1000000, riskPct = 1) {
+function sizing(price, atr14, stops, capital = 1000000, riskPct = 1, roundFn = null) {
   if (!price || !atr14) return null; const risk = capital * riskPct / 100;
-  return [["2 倍 ATR", price - 2 * atr14], ["3 倍 ATR", price - 3 * atr14]].concat(stops || []).filter((s) => s[1] > 0 && s[1] < price).map(([name, stop]) => {
+  return [["2 倍 ATR", price - 2 * atr14], ["3 倍 ATR", price - 3 * atr14]].concat(stops || []).map(([n, x]) => [n, roundFn && x > 0 ? roundFn(x) : x]).filter((s) => s[1] > 0 && s[1] < price).map(([name, stop]) => {
     const dist = price - stop, shares = Math.floor(risk / dist), value = shares * price;
     return { name, stop: round(stop), distPct: round(dist / price * 100), shares, lots: round(shares / 1000, 2), value: Math.round(value), weight: round(value / capital * 100, 1) };
   });

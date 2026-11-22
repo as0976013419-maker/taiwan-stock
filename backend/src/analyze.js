@@ -40,8 +40,20 @@ async function build(src, code) {
   // 報價優先序：盤中即時 → 日收盤快照 → 歷史最後一根
   const n = hasHist ? hist.closes.length - 1 : -1;
   const fromHist = hasHist ? { code, name: code, price: hist.closes[n], prevClose: hist.closes[n - 1], change: round(hist.closes[n] - hist.closes[n - 1]), changePct: round((hist.closes[n] / hist.closes[n - 1] - 1) * 100), open: hist.opens[n], high: hist.highs[n], low: hist.lows[n], volume: Math.round(hist.volumes[n] / 1000), date: hist.dates[n] } : {};
-  const quote = Object.assign({}, fromHist, row || {}, live || {}, { code, name: (row && row.name) || (live && live.name) || code, isETF: /^00/.test(code), industry: row ? row.industry : null });
-  delete quote.inst; delete quote.margin;
+  // 依資料日期選出最新的來源；不同日期的欄位不得混成同一筆（例如前一日的成交金額配上當日價格）
+  const srcs = [];
+  if (hasHist) srcs.push(Object.assign({ source: "FinMind 日K", pri: 1 }, fromHist));
+  if (row) srcs.push(Object.assign({ source: (row.market === "上櫃" ? "櫃買中心" : "證交所") + " OpenAPI 日收盤", pri: 2 }, row));
+  if (live && live.price) srcs.push(Object.assign({ source: "證交所 MIS" + (live.realtime ? " 盤中即時" : " 收盤"), pri: 3 }, live));
+  const primary = srcs.slice().sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")) || b.pri - a.pri)[0];
+  const sameDay = srcs.filter((x) => x !== primary && x.date && x.date === primary.date).sort((a, b) => b.pri - a.pri);
+  const fld = (k) => { for (const x of [primary].concat(sameDay)) if (x[k] !== undefined && x[k] !== null && x[k] !== "") return x[k]; return null; };
+  const valueSrc = [primary].concat(sameDay).find((x) => x.value > 0);
+  const quote = { code, name: (row && row.name) || (live && live.name) || code, market: (row && row.market) || (live && live.market) || null, isETF: /^00/.test(code), industry: row ? row.industry : null,
+    price: primary.price, prevClose: fld("prevClose"), change: fld("change"), changePct: fld("changePct"), open: fld("open"), high: fld("high"), low: fld("low"), volume: fld("volume"),
+    value: valueSrc ? valueSrc.value : null, valueSource: valueSrc ? valueSrc.source : null, date: primary.date || null, time: primary.time || primary.date || null,
+    realtime: !!primary.realtime, limitUp: fld("limitUp"), limitDown: fld("limitDown"), source: primary.source,
+    staleSources: srcs.filter((x) => x.date && primary.date && x.date < primary.date).map((x) => ({ source: x.source, date: x.date })) };
 
   // 盤中：把即時價併入歷史最後一根，讓指標反映當下
   let h = hasHist ? hist : null;
@@ -81,6 +93,9 @@ async function build(src, code) {
   // 財報衍生：近四季 EPS、單季 EPS 年增、實際 ROE、毛利率變化、負債比
   if (fin && fin.length) {
     const L = fin[fin.length - 1], Y = fin.length >= 5 ? fin[fin.length - 5] : null, last4 = fin.slice(-4), prev4 = fin.length >= 8 ? fin.slice(-8, -4) : null, sum = (a, k) => a.every((x) => x[k] !== null) ? a.reduce((t, x) => t + x[k], 0) : null;
+    // 成長率無法計算時，說明是「不適用」（負基期／本期虧損）還是「資料不足」，不讓兩者都顯示成缺資料
+    const why = (cur, base, enough) => (!enough ? "財報期數不足" : cur === null || cur === undefined ? "資料不足" : base === null || base === undefined ? "資料不足" : base <= 0 ? "比較基期 EPS ≤ 0，成長率不適用" : null);
+    Object.assign(fundamentals, { epsYoYNote: why(L.eps, Y ? Y.eps : null, !!Y), epsTTMYoYNote: why(last4.length === 4 ? sum(last4, "eps") : null, prev4 ? sum(prev4, "eps") : null, !!prev4) });
     Object.assign(fundamentals, { quarter: L.label, epsQ: L.eps, epsYoY: Y && Y.eps > 0 && L.eps !== null ? round((L.eps / Y.eps - 1) * 100, 1) : null, epsTTM: last4.length === 4 ? round(sum(last4, "eps"), 2) : null,
       epsTTMYoY: prev4 && sum(prev4, "eps") > 0 && sum(last4, "eps") !== null ? round((sum(last4, "eps") / sum(prev4, "eps") - 1) * 100, 1) : null,
       gm: L.gm, gmYoY: Y && Y.gm !== null && L.gm !== null ? round(L.gm - Y.gm, 1) : null, om: L.om, nm: L.nm,
@@ -100,7 +115,7 @@ async function build(src, code) {
 
   const scored = scoreStock({ snap: Object.assign({}, row || {}, { isETF: quote.isETF }), ind: indicators, chip, margin, fund: fundamentals, sector, holding });
   // 量化模組
-  const rs2 = hp ? Q.relStrength(hp, index, ht) : null;
+  const rs2 = hp ? Q.relStrength(hp, index, ht, adj ? adj.unexplained : []) : null;
   const quant = hp ? { risk: Q.riskMetrics(ht, index, hp), rs: rs2, trend: Q.trendTemplate(hp, rs2), turtle: Q.turtle(hp), events: Q.eventStudy(ht), factors: Q.factors(ht) } : null;
   let market = null; // 大盤狀態（順勢交易的前提）
   if (index) { const ic = index.closes, m = (p) => (ic.length >= p ? ic.slice(-p).reduce((a, x) => a + x, 0) / p : null), last = ic[ic.length - 1];
@@ -117,7 +132,7 @@ async function build(src, code) {
     financials: fin, balance: bal, dividends, holding, news, quant, market, coverage: { got: [snapAll, hist, chip, margin, etfCode || revenue, etfCode || per, etfCode || fin, etfCode || bal, dividends, holding, index].filter(Boolean).length, total: 11 }, _v: VERSION, demo: !!src.demo,
     history: hp ? hp.dates.slice(-60).map((d, k) => { const j = hp.dates.length - Math.min(60, hp.dates.length) + k; return { date: d, open: hp.opens[j], high: hp.highs[j], low: hp.lows[j], close: hp.closes[j], volume: hp.volumes[j] }; }) : [] };
   const rep = buildReport(out);
-  out.text = rep.text; out.stance = rep.stance; out.tags = rep.tags; out.horizons = rep.horizons;
+  out.text = rep.text; out.stance = rep.stance; out.tags = rep.tags; out.horizons = rep.horizons; out.stanceDetail = rep.stanceDetail;
   return out;
 }
 /** 把「今天」的行情併入歷史最後一根（歷史快取較久，最新一根以快照／即時報價為準） */
