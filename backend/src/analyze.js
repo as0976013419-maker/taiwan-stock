@@ -60,13 +60,17 @@ async function build(src, code) {
   if (h && live && live.date && live.price) h = mergeBar(h, live);
   else if (h && row) h = mergeBar(h, row);
   // 價格還原：hp＝只還原股數變動（價位計算用）、ht＝再還原現金股利（報酬統計用）
-  let adj = null, actionsOk = true;
+  let adj = null, actionsOk = true, limitInfo = null;
   if (h) {
     const divEv = ok(rd) && ok(rd).events; let actions = [];
     try { actions = ((await src.getSplitMap()).get(code)) || []; } catch (e) { actionsOk = false; }
-    adj = Q.adjustPrices(h, divEv, actions, { limit: Q.limitFor(code) });
+    // 漲跌幅限制依官方基金分類判定（只有 00 開頭的 ETF 需要查）；查不到就標示「分類無法確認」
+    let cls = null, clsFail = null;
+    if (/^00/.test(code) && src.getEtfClassMap) { try { cls = (await src.getEtfClassMap()).get(code) || null; } catch (e) { clsFail = "證交所基金分類取得失敗"; } }
+    limitInfo = Q.priceLimit(code, cls, clsFail);
+    adj = Q.adjustPrices(h, divEv, actions, Q.limitOpts(limitInfo));
     if (adj.unexplained.length && src.getCapitalReductions) { // 仍有查無公告的異常跳動 → 再查減資參考價（多數股票不會走到這裡）
-      try { const red = await src.getCapitalReductions(code); if (red.length) adj = Q.adjustPrices(h, divEv, actions.concat(red), { limit: Q.limitFor(code) }); } catch (e) { /* 查不到就維持不還原 */ }
+      try { const red = await src.getCapitalReductions(code); if (red.length) adj = Q.adjustPrices(h, divEv, actions.concat(red), Q.limitOpts(limitInfo)); } catch (e) { /* 查不到就維持不還原 */ }
     }
   }
   let hp = adj ? adj.price : null, ht = adj ? adj.total : null, cut = null;
@@ -130,7 +134,7 @@ async function build(src, code) {
   if (!holding) missing.push("外資持股"); if (!index) missing.push("大盤指數");
   if (!indicators) missing.push("歷史K線"); if (!chip) missing.push(row && row.inst ? "三大法人歷史（僅有當日）" : "三大法人"); if (!margin && !quote.isETF) missing.push("融資融券"); if (!revenue && !quote.isETF && fundamentals.revYoY === null) missing.push("月營收");
   const out = { code, quote, indicators, chip, margin, fundamentals, revenue, sector, scored, missing, instToday: row ? row.inst : null, marginToday: row ? row.margin : null, intraday,
-    adjust: adj ? { splits: adj.splits, unexplained: adj.unexplained, cut, dividendsApplied: adj.dividendsApplied, dividendsAvailable: divOk, actionsAvailable: actionsOk } : null,
+    adjust: adj ? { splits: adj.splits, unexplained: adj.unexplained, cut, dividendsApplied: adj.dividendsApplied, dividendsAvailable: divOk, actionsAvailable: actionsOk, priceLimit: limitInfo } : null,
     asOf: { quote: quote.time || quote.date || null, snapshot: row ? row.date : null, kline: h ? h.dates[h.dates.length - 1] : null, chip: chip ? chip[chip.length - 1].date : null, margin: margin ? margin[margin.length - 1].date : null,
       revenue: revenue ? revenue.ym : null, financials: fin && fin.length ? fin[fin.length - 1].label : null, holding: holding ? holding.date : null, index: index ? index.dates[index.dates.length - 1] : null },
     financials: fin, balance: bal, dividends, holding, news, quant, market, coverage: { got: [snapAll, hist, chip, margin, etfCode || revenue, etfCode || per, etfCode || fin, etfCode || bal, dividends, holding, index].filter(Boolean).length, total: 11 }, _v: VERSION, demo: !!src.demo,

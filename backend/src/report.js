@@ -127,9 +127,13 @@ function buildReport(a) {
     a.asOf ? `【各項資料日期與來源】報價 ${a.asOf.quote || "—"}（${q.source || "—"}）｜K 線 ${a.asOf.kline || "—"}（FinMind）｜法人 ${a.asOf.chip || "—"}｜融資券 ${a.asOf.margin || "—"}｜外資持股 ${a.asOf.holding || "—"}（以上 FinMind）｜月營收 ${a.asOf.revenue || "—"}｜季財報 ${a.asOf.financials || "—"}（FinMind，源自公開資訊觀測站）｜大盤 ${a.asOf.index || "—"}（加權指數）｜族群與官方估值 ${a.asOf.snapshot || "—"}（證交所／櫃買中心 OpenAPI）` : "",
     q.staleSources && q.staleSources.length ? `【資料落後】${q.staleSources.map((x) => x.source + " 仍停在 " + x.date).join("、")}；本頁報價採用 ${q.date} 的資料，落後來源的欄位（如成交金額、族群統計、官方估值）已分別標示日期或換算，不與當日數字混用。` : "",
     a.adjust && a.adjust.splits.length ? `【價格還原】依官方公告還原股數變動：${a.adjust.splits.map((x) => x.date + " " + x.type + "（參考價 " + f(x.before) + " → " + f(x.after) + "，" + x.ratio + " 倍）").join("、")}。該日之前的歷史價格與成交量已換算成現在的股數基準；之後的價格就是實際成交價。` : "",
-    a.adjust && a.adjust.unexplained.length ? `【無法解釋的價格跳動】${a.adjust.unexplained.slice(0, 5).map((x) => x.date + "（" + pc(x.movePct, 1) + "）").join("、")}${a.adjust.unexplained.length > 5 ? " 等 " + a.adjust.unexplained.length + " 次" : ""}：單日變動超過漲跌幅限制，但查無分割、面額變更、減資或股利紀錄，無法判斷是真實行情還是未收錄的公司行動，系統不做任何換算。${a.adjust.cut ? "為避免跨越這個斷點，所有價格類計算（技術指標、多週期報酬、波動、回撤、歷史訊號、趨勢模板、支撐壓力）只使用 " + a.adjust.cut.from + " 起的 " + a.adjust.cut.kept + " 根 K 線（捨棄之前 " + a.adjust.cut.dropped + " 根）；回看長度超過這段資料的指標一律不計算。" : ""}` : "",
+    (() => { const u = (a.adjust && a.adjust.unexplained) || [], ux = u.filter((x) => !x.unverified), uv = u.filter((x) => x.unverified), L = (xs) => xs.slice(0, 5).map((x) => x.date + "（" + pc(x.movePct, 1) + "）").join("、") + (xs.length > 5 ? " 等 " + xs.length + " 次" : "");
+      // 分類已確認：超過該商品的漲跌幅限制；分類無法確認：只能說「超過 10%」，不聲稱違反任何漲跌幅規則
+      return (ux.length ? `【無法解釋的價格跳動】${L(ux)}：單日變動超過漲跌幅限制，但查無分割、面額變更、減資或股利紀錄，無法判斷是真實行情還是未收錄的公司行動，系統不做任何換算。` : "")
+        + (uv.length ? `【大幅變動、無法校驗】${L(uv)}：單日變動超過 10%，查無分割、面額變更、減資或股利紀錄；${a.adjust.priceLimit ? a.adjust.priceLimit.basis : "漲跌幅分類無法確認"}，所以無法判定是正常行情還是未收錄的公司行動，這不代表違反漲跌幅規則。` : "")
+        + (u.length ? `${a.adjust.cut ? "為避免跨越這個斷點，所有價格類計算（技術指標、多週期報酬、波動、回撤、歷史訊號、趨勢模板、支撐壓力）只使用 " + a.adjust.cut.from + " 起的 " + a.adjust.cut.kept + " 根 K 線（捨棄之前 " + a.adjust.cut.dropped + " 根）；回看長度超過這段資料的指標一律不計算。" : ""}` : ""); })(),
     a.adjust && !a.adjust.dividendsAvailable ? "【注意】股利資料暫時無法取得：「含息」報酬不顯示；報酬、波動、回撤與歷史訊號統計未還原除息，除息日被算成下跌，所以報酬偏低、波動與回撤偏高。" : "",
-    "【可偵測範圍】只能偵測單日變動超過漲跌幅限制的公司行動；幅度在限制以內、又未收錄於資料源的股數變動（例如小比例配股）無法偵測。上市未滿 10 個交易日的資料不做偵測。",
+    "【可偵測範圍】只能偵測單日變動超過漲跌幅限制的公司行動；幅度在限制以內、又未收錄於資料源的股數變動（例如小比例配股）無法偵測。上市未滿 10 個交易日的資料不做偵測。" + (a.adjust && a.adjust.priceLimit ? "本檔漲跌幅依據：" + a.adjust.priceLimit.basis + (a.adjust.priceLimit.known && a.adjust.priceLimit.limit === null ? "；不設漲跌幅的商品無法用這個方法偵測，只依官方公告還原。" : "。") : ""),
     a.adjust && !a.adjust.actionsAvailable ? "【注意】官方股數變動清單暫時無法取得，若這檔股票曾分割或變更面額，長期報酬與均線會失真。" : "",
   ]);
 

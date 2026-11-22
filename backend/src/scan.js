@@ -28,11 +28,13 @@ function universeOf(all, universe) {
   return byValue.slice(0, 150); // custom：成交值前 150 的熱門股池
 }
 async function withHistory(src, rows) {
-  const { mergeBar } = require("./analyze"), { adjustPrices, cutAfterJumps, limitFor } = require("./quant");
+  const { mergeBar } = require("./analyze"), { adjustPrices, cutAfterJumps, priceLimit, limitOpts } = require("./quant");
   const hs = await mapLimit(rows, 4, (r) => src.getHistory(r.code, daysAgo(200)));
   let splits = new Map(); try { if (src.getSplitMap) splits = await src.getSplitMap(); } catch (e) { /* 清單取不到時維持原始價格 */ }
+  let cls = null, clsFail = null; // 只有清單中有 ETF 時才查官方基金分類（判定漲跌幅限制）
+  if (rows.some((r) => /^00/.test(r.code)) && src.getEtfClassMap) { try { cls = await src.getEtfClassMap(); } catch (e) { clsFail = "證交所基金分類取得失敗"; } }
   return rows.map((r, i) => { if (!(hs[i] && hs[i].closes.length >= 30)) return { r, ind: null };
-    const merged = mergeBar(hs[i], r), a = adjustPrices(merged, null, splits.get(r.code) || [], { limit: limitFor(r.code) });
+    const merged = mergeBar(hs[i], r), a = adjustPrices(merged, null, splits.get(r.code) || [], limitOpts(priceLimit(r.code, cls && cls.get(r.code), clsFail)));
     // 掃描沒有股利資料：大額除息也可能被列為無法解釋的跳動，此時只會讓可用資料變短（保守），不會產生跨越斷點的指標
     const c = cutAfterJumps(a.price, a.unexplained).series;
     return { r, ind: c.closes.length >= 30 ? snapshot(c) : null }; });

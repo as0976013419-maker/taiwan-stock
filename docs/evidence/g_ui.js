@@ -3,8 +3,8 @@
 const { chromium } = require("playwright"), fs = require("fs"), path = require("path");
 const [DIR, BE, OUT, B] = process.argv.slice(2);
 const raw = JSON.parse(fs.readFileSync(path.join(DIR, "h_0050.json"), "utf8")); raw.code = "0050";
-const { adjustPrices, limitFor } = require(path.resolve(BE, "src/quant"));
-const a = adjustPrices(raw, [], [{ date: "2025-06-18", before: 188.65, after: 47.16, type: "分割" }], { limit: limitFor("0050") });
+const { adjustPrices, priceLimit, limitOpts } = require(path.resolve(BE, "src/quant"));
+const a = adjustPrices(raw, [], [{ date: "2025-06-18", before: 188.65, after: 47.16, type: "分割" }], limitOpts(priceLimit("0050", { type: "國內成分證券指數股票型基金", foreign: "否", name: "元大台灣卓越50證券投資信託基金" })) /* 證交所 t187ap47_L 的 0050 分類 */);
 (async () => {
   const b = await chromium.launch(), p = await b.newPage({ viewport: { width: 1400, height: 4000 }, deviceScaleFactor: 2 }), errs = [];
   p.on("pageerror", (e) => errs.push(e.message));

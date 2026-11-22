@@ -469,6 +469,7 @@ async function fetchData(code, start, end) {
     lows:    rows.map(function(r){return +r.min ||+r.close||0;}),
     closes:  rows.map(function(r){return +r.close||0;}),
     volumes: rows.map(function(r){return +r.Trading_Volume||0;}),
+    fallbackSource: true, // 未經公司行動檢查：回測會被引擎拒絕
   };
   dataCache[key] = result;
   return result;
@@ -569,10 +570,11 @@ function pfTxt(m) { return m.profitFactor >= 999 ? '無虧損交易' : fmtN(m.pr
 function diagHTML(dg, m, cfg) {
   if (!dg) return '';
   var lines = [];
+  if (dg.demoData) lines.push('<b style="color:var(--yellow,#f59e0b)">⚠ 示範資料：此回測使用程式產生的假行情，績效、交易紀錄與期末訊號都不是真實結果，不可作為交易依據。</b>');
   if (dg.preBars) lines.push('回測期間自 ' + dg.periodStart + ' 起（' + dg.bars + ' 個交易日）；另使用起始日前 ' + dg.preBars + ' 根 K 線計算指標，這段不交易、不計入績效。');
   if (dg.startDelayed) lines.push('起始日前的資料不足 ' + dg.lookback + ' 根（指標所需回看長度），' + dg.tradeFrom + ' 之前不交易，但這段仍計入績效期間。');
   else if (!dg.preBars) lines.push('前 ' + dg.warmup + ' 根 K 線用於指標暖機、不交易；可交易期間自 ' + (dg.tradeFrom || '—') + ' 起。');
-  if (dg.corpChecked === false) lines.push('⚠ 資料來自備援來源，未檢查分割、面額變更或減資等公司行動；若期間內發生，結果會失真。');
+  if (dg.priceLimit && dg.priceLimit.limit === null) lines.push('漲跌幅依據：' + dg.priceLimit.basis + (dg.priceLimit.known ? '。不設漲跌幅的商品無法用漲跌幅偵測未收錄的公司行動，只依官方公告還原。' : '。分類無法確認時，超過 10% 且查無公告的變動會停止回測，但不代表違反漲跌幅規則。'));
   if (dg.shareChanges && dg.shareChanges.length) lines.push('⚠ 回測期間內有官方股數變動：' + dg.shareChanges.map(function(x) { return x.date + ' ' + x.type + '（' + (x.before && x.after ? '公告參考價 ' + x.before + ' → ' + x.after + '，' : '') + '換算比例 ' + x.ratio + '）'; }).join('、') +
     '。變動前的價格與成交量已依公告換算成目前的股數基礎，每筆交易的報酬率不受影響；但變動前的「張數」是換算後的單位：依參考價換算，當時的 1 張約等於現在的 ' + dg.shareChanges.map(function(x) { return x.ratio; }).join('、') +
     ' 張，整張取捨與升降單位都和當時實際可交易的不同，所以部位大小、損益金額與權益曲線會和當時實際做得到的結果有差異。' + (dg.entriesBeforeShareChange ? '本次有 ' + dg.entriesBeforeShareChange + ' 筆進場發生在變動前，' : '') + '這段屬於研究模擬，不是當時實際成交的重現。');
@@ -599,7 +601,7 @@ function showResults(result, data) {
   }
   window._lastView = view;
 
-  // 今日訊號（直接用 core 的 SignalEngine）
+  // 期末訊號：以資料最後一天計算（回測舊區間時不是「今日」）
   var lastI = data.closes.length - 1;
   var ind   = Indicators.precompute(data);
   var cfg   = window._lastConfig;
@@ -620,7 +622,7 @@ function showResults(result, data) {
     +'<button class="btn-sm" onclick="alert(\'Benchmark/Replay/Monte Carlo 開發中\')" style="color:var(--text3)">更多...</button>'
     +'<span class="worker-badge" onclick="toggleDebug()" title="點擊切換 debug 模式">'+(BT_DEBUG?'DEBUG ON':'Web Worker ✓')+'&nbsp;v'+(BT_ENGINE?BT_ENGINE.version:'4.1')+'</span>'
     +'</div>'
-    +'<div class="signal-box"><div class="signal-title">今日操作建議 — '+(cfg.code||'')+'（'+data.dates[lastI]+'）</div>'
+    +'<div class="signal-box"><div class="signal-title">期末訊號 — '+(cfg.code||'')+'（資料日期 '+data.dates[lastI]+'）'+(result.diag && result.diag.demoData ? ' ⚠ 示範資料' : '')+'</div>'
     +'<div style="display:flex;align-items:center;gap:10px"><span class="signal-badge '+sigCls+'">'+sigTxt+'</span>'
     +'<span style="font-size:12px;color:var(--text2)">'+sigInfo+'</span></div></div>'
     +'<div class="stat-grid">'
@@ -749,8 +751,17 @@ async function runBacktest() {
     var data = await fetchData(code, preStart, end);
     config.tradeStart = start;
     config.unexplained = Array.isArray(data.unexplained) ? data.unexplained.map(function(x) { return x.date; }) : null;
-    config.corpChecked = Array.isArray(data.unexplained); // 備援來源（直接打 FinMind）沒有公司行動檢查
+    // 分類無法確認時的大幅變動（unverified）：一樣停止回測，但文字不聲稱違反漲跌幅規則
+    config.unverifiedJumps = Array.isArray(data.unexplained) ? data.unexplained.filter(function(x) { return x.unverified; }).map(function(x) { return x.date; }) : [];
+    config.priceLimit = data.priceLimit || null; // 後端依官方基金分類判定的漲跌幅依據
+    // 公司行動檢查狀態原樣交給 worker：只有後端明確完成檢查（unexplained 為陣列、沒有缺資料訊息）才算完成；
+    // 備援來源（瀏覽器直接連 FinMind）沒有檢查，引擎會停止回測並列出缺少的資料
+    config.corpChecked = Array.isArray(data.unexplained) && !data.checkNote;
+    config.corpMissing = config.corpChecked ? [] : [data.fallbackSource ? '資料來自備援來源（瀏覽器直接連 FinMind），沒有經過本站的分割、面額變更、減資與股利檢查；本站資料服務可能正在啟動或暫時無法連線'
+      : (data.checkNote || '資料服務沒有回報公司行動檢查結果')];
     config.splitAdjusted = Array.isArray(data.splitAdjusted) ? data.splitAdjusted : []; // 後端已依官方公告換算的股數變動
+    config.demoData = data.demo === true; // 示範資料（假行情）：結果、診斷與匯出都要保留標記
+    showDemoBanner(config.demoData);
     setProgress(40,'共 '+data.closes.length+' 筆，啟動 Web Worker...');
 
     // 傳送 typed array 需先轉為普通陣列（postMessage structured clone）
@@ -769,7 +780,7 @@ async function runBacktest() {
       function(pct){ setProgress(40 + pct*0.5, '計算中 '+pct+'%...'); },
       function(result, err) {
         if (err) { setProgress(0,'錯誤：'+err); return done(); }
-        setProgress(100,'回測完成 — '+(result.equity?result.equity.length:data.closes.length)+' 個交易日，'+result.metrics.tradeCount+' 筆交易');
+        setProgress(100,'回測完成'+(result.diag && result.diag.demoData ? '（示範資料，非真實行情）' : '')+' — '+(result.equity?result.equity.length:data.closes.length)+' 個交易日，'+result.metrics.tradeCount+' 筆交易');
         // 還原 typed array
         result.equity = Array.isArray(result.equity) ? result.equity : Array.from(result.equity);
         showResults(result, data);
@@ -926,20 +937,22 @@ function toggleDebug() {
   } catch(e) {}
 }
 
+// 示範資料的匯出檔：檔名加上 DEMO_，內容也標示（見 bt-storage.js）
+function demoPrefix() { var r = window._lastResult; return r && r.diag && r.diag.demoData ? 'DEMO_' : ''; }
 function doExportJSON() {
   if (!window._lastResult) return alert('請先執行回測');
   dlFile(BacktestStorage.exportFullJSON(window._lastResult,window._lastData,window._lastConfig),
-    (window._lastConfig.code||'bt')+'_backtest_'+today+'.json','application/json');
+    demoPrefix()+(window._lastConfig.code||'bt')+'_backtest_'+today+'.json','application/json');
 }
 function doExportTrades() {
   if (!window._lastResult) return alert('請先執行回測');
   dlFile(BacktestStorage.exportTradesCSV(window._lastResult),
-    (window._lastConfig.code||'bt')+'_trades_'+today+'.csv','text/csv;charset=utf-8');
+    demoPrefix()+(window._lastConfig.code||'bt')+'_trades_'+today+'.csv','text/csv;charset=utf-8');
 }
 function doExportEquity() {
   if (!window._lastResult) return alert('請先執行回測');
   dlFile(BacktestStorage.exportEquityCSV(window._lastResult,(window._lastResult&&window._lastResult.dates)||(window._lastData?window._lastData.dates:null)),
-    (window._lastConfig.code||'bt')+'_equity_'+today+'.csv','text/csv;charset=utf-8');
+    demoPrefix()+(window._lastConfig.code||'bt')+'_equity_'+today+'.csv','text/csv;charset=utf-8');
 }
 
 // ── 策略管理 ─────────────────────────────────────────────────
@@ -1031,3 +1044,6 @@ function loadStrategy(s) {
 
 renderStratList();
 
+// 示範資料模式：與首頁相同，頁面一載入就顯示橫幅（/history 回應的 demo 旗標也會再確認一次）
+function showDemoBanner(on) { var b = document.getElementById('demoBanner'); if (b && on) b.style.display = 'block'; }
+try { fetch(RENDER_URL + '/health').then(function(r) { return r.json(); }).then(function(j) { showDemoBanner(j && j.demo); }).catch(function() {}); } catch (e) {}

@@ -4,9 +4,9 @@
 const fs = require("fs"), path = require("path"), vm = require("vm");
 const [DIR, BE, CORE] = process.argv.slice(2).map((p) => path.resolve(p));
 const raw = JSON.parse(fs.readFileSync(path.join(DIR, "h_0050.json"), "utf8")); raw.code = "0050";
-const { adjustPrices, limitFor } = require(path.join(BE, "src/quant"));
+const { adjustPrices, priceLimit, limitOpts } = require(path.join(BE, "src/quant"));
 const act = [{ date: "2025-06-18", before: 188.65, after: 47.16, type: "分割" }]; // 與 /history 使用的官方清單相同
-const a = adjustPrices(raw, [], act, { limit: limitFor("0050") }), adj = a.price, splits = a.splits;
+const a = adjustPrices(raw, [], act, limitOpts(priceLimit("0050", { type: "國內成分證券指數股票型基金", foreign: "否", name: "元大台灣卓越50證券投資信託基金" })) /* 證交所 t187ap47_L 的 0050 分類 */), adj = a.price, splits = a.splits;
 const f = (x, d = 0) => Number(x).toLocaleString("en-US", { maximumFractionDigits: d, minimumFractionDigits: d });
 const iPre = raw.dates.indexOf("2025-06-10"), fee = 0.001425, cap = 1000000;
 console.log("官方紀錄：", JSON.stringify(splits));

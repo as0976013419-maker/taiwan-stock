@@ -13,7 +13,7 @@ const DEMO = process.env.DEMO === "1";
 const src = DEMO ? require("./src/demo") : require("./src/sources");
 const { runScan } = require("./src/scan");
 const { analyze } = require("./src/analyze");
-const { adjustPrices, limitFor } = require("./src/quant");
+const { adjustPrices, priceLimit, limitOpts } = require("./src/quant");
 const ai = require("./src/ai");
 
 const PORT = process.env.PORT || 3001;
@@ -75,15 +75,21 @@ async function api(req, res, url, ip) {
     const raw = await src.getHistory(code.toUpperCase(), start, end);
     let h = raw, splitAdjusted = [], unexplained = null, checkNote = null; const C = code.toUpperCase();
     let acts = null, divEv = null;
-    try { acts = src.getSplitMap ? ((await src.getSplitMap()).get(C) || []) : []; } catch (e) { checkNote = "官方股數變動清單取得失敗"; }
-    try { const dv = src.getDividends ? await src.getDividends(C) : null; divEv = dv && dv.events ? dv.events : []; /* 回傳 null 代表查無股利紀錄（從未配息），不是取得失敗 */ } catch (e) { checkNote = checkNote || "股利資料取得失敗"; }
+    const miss = []; // 公司行動檢查缺少的資料：前端會據此停止回測並顯示
+    try { acts = src.getSplitMap ? ((await src.getSplitMap()).get(C) || []) : []; } catch (e) { miss.push("官方股數變動清單（分割、反分割、面額變更）取得失敗"); }
+    try { const dv = src.getDividends ? await src.getDividends(C) : null; divEv = dv && dv.events ? dv.events : []; /* 回傳 null 代表查無股利紀錄（從未配息），不是取得失敗 */ } catch (e) { miss.push("股利紀錄取得失敗"); }
+    if (miss.length) checkNote = miss.join("、");
+    // 漲跌幅限制依官方基金分類（00 開頭才查）；分類無法確認時，超過 10% 的變動標示 unverified，不聲稱違反規則
+    let cls = null, clsFail = null;
+    if (/^00/.test(C) && src.getEtfClassMap) { try { cls = (await src.getEtfClassMap()).get(C) || null; } catch (e) { clsFail = "證交所基金分類取得失敗"; } }
+    const limitInfo = priceLimit(C, cls, clsFail);
     if (raw.closes.length > 1) {
-      const a = adjustPrices(raw, divEv, acts || [], { limit: limitFor(C) });
+      const a = adjustPrices(raw, divEv, acts || [], limitOpts(limitInfo));
       if (a.splits.length) { h = a.price; splitAdjusted = a.splits; } // 回測使用可交易價位：只還原股數變動，不還原現金股利
       // 只有在分割清單與股利資料都取得時，才能區分「無法解釋的跳動」與正常除息；否則回報未檢查，不冒然判定
       if (acts && divEv) unexplained = a.unexplained;
     }
-    return send(res, 200, Object.assign({}, h, { demo: DEMO, splitAdjusted, unexplained, checkNote }), { "Cache-Control": "public, max-age=300" });
+    return send(res, 200, Object.assign({}, h, { demo: DEMO, splitAdjusted, unexplained, checkNote, priceLimit: limitInfo }), { "Cache-Control": "public, max-age=300" });
   }
   if (p === "/analyze" && req.method === "POST") {
     if (limited(ip, "analyze", 30, 60000)) return send(res, 429, { error: "分析次數過於頻繁，請稍後再試" });

@@ -168,6 +168,8 @@ var BacktestStorage = (function() {
     return JSON.stringify({
       _schemaVersion: SCHEMA_VERSION,
       _exportTime: new Date().toISOString(),
+      dataNature: result.diag && result.diag.demoData ? 'demo' : 'market',
+      _warning: result.diag && result.diag.demoData ? '示範資料：程式產生的假行情，績效與交易都不是真實結果' : undefined,
       config:  config,
       metrics: result.metrics,
       trades:  result.trades,
@@ -178,19 +180,22 @@ var BacktestStorage = (function() {
   }
 
   function exportTradesCSV(result) {
-    var rows = ['\uFEFF日期,方向,備註,進場價,出場價,張數,淨損益(元),損益%,進場日期'];
+    // 示範資料：每一列加上「資料性質」欄，篩選或貼到其他表格時也不會遺失標記（真實資料的欄位不變）
+    var demo = !!(result.diag && result.diag.demoData), tag = '示範資料（非真實行情）';
+    var rows = ['\uFEFF日期,方向,備註,進場價,出場價,張數,淨損益(元),損益%,進場日期' + (demo ? ',資料性質' : '')];
     (result.trades || []).filter(function(t){return t.type==='exit';}).forEach(function(t) {
       rows.push([
         t.exitDate||t.date||'', t.side==='long'?'多單':'空單', t.reason||'',
         t.entryPrice.toFixed(2), t.exitPrice.toFixed(2),
         t.qty, Math.round(t.netPnl), t.pnlPct.toFixed(2)+'%', t.entryDate||''
-      ].join(','));
+      ].concat(demo ? [tag] : []).join(','));
     });
     return rows.join('\r\n');
   }
 
   function exportEquityCSV(result, dates) {
-    var rows = ['\uFEFF日期,淨值,報酬率%'];
+    var demo = !!(result.diag && result.diag.demoData), tag = '示範資料（非真實行情）';
+    var rows = ['\uFEFF日期,淨值,報酬率%' + (demo ? ',資料性質' : '')];
     var eq   = result.equity;
     var init = eq[0] || result.metrics.initCapital || 1;
     // large file protection：超過 5000 筆每 2 筆取 1
@@ -198,7 +203,7 @@ var BacktestStorage = (function() {
     for (var i = 0; i < eq.length; i += step) {
       var v = eq[i];
       if (!isFinite(v)) v = init;
-      rows.push([(dates&&dates[i])||i, Math.round(v), ((v-init)/Math.max(init,1)*100).toFixed(2)].join(','));
+      rows.push([(dates&&dates[i])||i, Math.round(v), ((v-init)/Math.max(init,1)*100).toFixed(2)].concat(demo ? [tag] : []).join(','));
     }
     return rows.join('\r\n');
   }

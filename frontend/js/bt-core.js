@@ -607,8 +607,8 @@ function updatePositionMark(pos, currentPrice) {
   }
 }
 
-function closePosition(pos, exitPrice, exitDate, sellFeeRate) {
-  var exitFees = pos.qty * 1000 * exitPrice * sellFeeRate;
+function closePosition(pos, exitPrice, exitDate, exitFeeRate) { // 多單出場＝賣出費率；空單回補＝買進費率
+  var exitFees = pos.qty * 1000 * exitPrice * exitFeeRate;
   var grossPnl = pos.side === 'long'
     ? pos.qty * 1000 * (exitPrice - pos.entryPrice) - pos.entryFees
     : pos.qty * 1000 * (pos.entryPrice - exitPrice) - pos.entryFees;
@@ -668,33 +668,33 @@ function portfolioEnterLong(pf, qty, price, date, buyFeeRate) {
 
 // ── 正確的做空會計 ──────────────────────────────────────────────
 // 台股融券：
-//   進場：凍結保證金 = 放空市值（此處簡化為 100% 保證金率）
-//         balance -= margin
+//   進場（融券賣出）：凍結保證金 = 放空市值（此處簡化為 100% 保證金率）；費用 = 放空市值 × 賣出費率（手續費＋證交稅）
+//         balance -= margin + entryFees
 //         usedMargin += margin
 //   出場：
 //         grossPnl = qty * 1000 * (entryPrice - exitPrice)
-//         fees = exitValue * sellFeeRate
+//         回補是買進：fees = exitValue * buyFeeRate（只有手續費，證交稅已在融券賣出時計入）
 //         netPnl = grossPnl - entryFees - exitFees
 //         退還 = margin + netPnl
 //         balance += margin + netPnl  （只退保證金+損益，不憑空加本金）
 //         usedMargin -= margin
 // ──────────────────────────────────────────────────────────────
-function portfolioEnterShort(pf, qty, price, date, buyFeeRate) {
+function portfolioEnterShort(pf, qty, price, date, feeRate) { // feeRate：融券賣出的費率（手續費＋證交稅）
   var margin = qty * 1000 * price;     // 凍結保證金
-  var fees   = margin * buyFeeRate;    // 融券手續費
+  var fees   = margin * feeRate;       // 融券賣出：手續費＋證交稅
   if (margin + fees > pf.balance || qty <= 0) return false;
 
   pf.balance    -= (margin + fees);   // 扣除保證金 + 手續費
   pf.usedMargin += margin;            // 凍結保證金
-  pf.position    = createPosition('short', qty, price, date, buyFeeRate);
+  pf.position    = createPosition('short', qty, price, date, feeRate);
   pf.position.entryFees = fees;
   return true;
 }
 
-function portfolioExitPosition(pf, exitPrice, date, sellFeeRate, reason) {
+function portfolioExitPosition(pf, exitPrice, date, exitFeeRate, reason) {
   if (!pf.position) return null;
   var pos    = pf.position;
-  var result = closePosition(pos, exitPrice, date, sellFeeRate);
+  var result = closePosition(pos, exitPrice, date, exitFeeRate);
 
   // 退還保證金 + 損益（正確做法）
   pf.balance    += result.returnMargin;
@@ -773,6 +773,9 @@ var ExecutionEngine = (function() {
     var buyFeeRate    = +config.buyFee  > 0 ? +config.buyFee  / 100 : (isETF ? 0.001 : 0.001425);
     var sellFeeRate   = +config.sellFee > 0 ? +config.sellFee / 100 : (isETF ? 0.002 : 0.004425);
     var shortEnabled  = !!config.shortEnabled;
+    // 證交稅由賣方繳納：空單「進場」是融券賣出，套賣出費率（手續費＋證交稅）；「回補」是買進，只套買進費率。
+    // 多單不變（買進＝buyFeeRate、賣出＝sellFeeRate）。ETF 或使用者自訂費率同樣依買賣方向對調。
+    var shortEntryRate = sellFeeRate, shortExitRate = buyFeeRate;
 
     var longStrat  = { entry: config.longEntry  || [], exit: config.longExit  || [] };
     // 移動停損：策略可能是字串（舊格式）或 {id, params}（目前 UI）；回撤比例讀使用者參數 pct（預設 5%）
@@ -788,13 +791,21 @@ var ExecutionEngine = (function() {
     var tradeStartIdx = 0;
     if (config.tradeStart) { tradeStartIdx = dates.findIndex(function(d) { return d >= config.tradeStart; }); if (tradeStartIdx < 0) tradeStartIdx = n; }
     var warmup = Math.max(lookback, tradeStartIdx);
+    // 公司行動檢查（官方股數變動清單＋股利紀錄）必須明確完成才回測；資料源失敗、備援來源或未提供狀態一律停止，
+    // 因為無法區分分割、減資、除權息與異常跳動，績效與訊號都不可靠。人工測試資料需明確設定 corpChecked: true。
+    if (config.corpChecked !== true) {
+      var miss = (config.corpMissing && config.corpMissing.length) ? config.corpMissing.join('；') : '沒有提供公司行動檢查狀態';
+      throw new Error('無法可靠回測：公司行動檢查未完成（' + miss + '）。沒有這些資料就無法區分分割、減資、除權息與異常跳動，所以不產生績效與訊號。請稍後重新執行回測；若持續失敗，代表資料源暫時無法取得。');
+    }
     // 期間內（含暖機所需的回看範圍）有超過漲跌幅限制、查無公告的價格跳動：無法可靠回測，直接停止
     if (config.unexplained && config.unexplained.length) {
       var from = dates[Math.max(0, tradeStartIdx - lookback)], hit = config.unexplained.filter(function(d) { return d >= from && d <= dates[n - 1]; });
+      var unv = config.unverifiedJumps || [], allUnv = hit.length && hit.every(function(d) { return unv.indexOf(d) >= 0; });
+      if (allUnv) throw new Error('回測期間（含指標暖機的回看範圍）內，' + hit.join('、') + ' 單日變動超過 10% 且查無分割、面額變更或減資公告；' + ((config.priceLimit && config.priceLimit.basis) || '漲跌幅分類無法確認') + '，無法判定是正常行情還是未收錄的公司行動，所以無法可靠回測（這不代表違反漲跌幅規則）。請把起始日設在 ' + hit[hit.length - 1] + ' 之後至少 ' + lookback + ' 個交易日。');
       if (hit.length) throw new Error('回測期間（含指標暖機的回看範圍）內，' + hit.join('、') + ' 有超過漲跌幅限制且查無分割、面額變更或減資公告的價格跳動，無法可靠回測。請把起始日設在 ' + hit[hit.length - 1] + ' 之後至少 ' + lookback + ' 個交易日。');
     }
     // 診斷：訊號出現幾次、幾次因資金不足一張（或其他原因）沒有成交
-    var diag = { warmup: warmup, lookback: lookback, tradeStartIdx: tradeStartIdx, preBars: tradeStartIdx, startDelayed: lookback > tradeStartIdx && !!config.tradeStart, tradeFrom: dates[Math.min(warmup, n - 1)] || null, periodStart: dates[Math.min(tradeStartIdx, n - 1)] || null, bars: n - tradeStartIdx, corpChecked: config.corpChecked !== false, entrySignals: 0, exitSignals: 0, rejected: 0, rejectedCash: 0, minCashNeeded: null, maxCashNeeded: null, pendingAtEnd: false, entryLog: [] };
+    var diag = { warmup: warmup, lookback: lookback, tradeStartIdx: tradeStartIdx, preBars: tradeStartIdx, startDelayed: lookback > tradeStartIdx && !!config.tradeStart, tradeFrom: dates[Math.min(warmup, n - 1)] || null, periodStart: dates[Math.min(tradeStartIdx, n - 1)] || null, bars: n - tradeStartIdx, corpChecked: true, demoData: config.demoData === true, priceLimit: config.priceLimit || null, entrySignals: 0, exitSignals: 0, rejected: 0, rejectedCash: 0, minCashNeeded: null, maxCashNeeded: null, pendingAtEnd: false, entryLog: [] };
     // 買進張數要把手續費算進去，否則 100% 部位時常因「股款＋手續費 > 現金」被靜默拒絕
     function lotsFor(base, price, feeRate) { return Math.floor(base * posSizePct / (price * 1000 * (1 + feeRate))); }
     function noteReject(price, feeRate) { diag.rejected++; var need = price * 1000 * (1 + feeRate); if (pf.balance < need) { diag.rejectedCash++; diag.minCashNeeded = diag.minCashNeeded === null ? Math.round(need) : Math.min(diag.minCashNeeded, Math.round(need)); diag.maxCashNeeded = Math.max(diag.maxCashNeeded || 0, Math.round(need)); } }
@@ -866,16 +877,16 @@ var ExecutionEngine = (function() {
         }
         if (pendingShortEntry && !pf.position) {
           var base = posBase === 'equity' ? portfolioEquity(pf) : capital;
-          var lots = lotsFor(base, execPrice, buyFeeRate), cash0 = pf.balance;
-          portfolioEnterShort(pf, lots, execPrice, date, buyFeeRate);
-          logEntry(dates[i - 1], date, 'short', execPrice, lots, cash0, buyFeeRate);
-          if (!pf.position) noteReject(execPrice, buyFeeRate);
+          var lots = lotsFor(base, execPrice, shortEntryRate), cash0 = pf.balance;
+          portfolioEnterShort(pf, lots, execPrice, date, shortEntryRate);
+          logEntry(dates[i - 1], date, 'short', execPrice, lots, cash0, shortEntryRate);
+          if (!pf.position) noteReject(execPrice, shortEntryRate);
           if (pf.position) {
             trades.push({ type: 'entry', side: 'short', date: date, price: execPrice, qty: lots, reason: 'strategy' });
           }
         }
         if (pendingShortExit && pf.position && pf.position.side === 'short') {
-          var t = portfolioExitPosition(pf, execPrice, date, sellFeeRate, pendingReason || 'strategy');
+          var t = portfolioExitPosition(pf, execPrice, date, shortExitRate, pendingReason || 'strategy');
           if (t) trades.push(Object.assign({}, t, { type: 'exit', side: 'short', date: date, price: execPrice, qty: t.qty }));
         }
         pendingLongEntry = pendingLongExit = pendingShortEntry = pendingShortExit = false;
@@ -905,13 +916,13 @@ var ExecutionEngine = (function() {
         } else if (pos.side === 'short') {
           var unrealPct = (pos.entryPrice - checkPrice) / pos.entryPrice;
           if (stopLossPct   && unrealPct <= -stopLossPct) {
-            var t = portfolioExitPosition(pf, checkPrice, date, sellFeeRate, 'stopLoss');
+            var t = portfolioExitPosition(pf, checkPrice, date, shortExitRate, 'stopLoss');
             if (t) trades.push(Object.assign({}, t, { type: 'exit', side: 'short', date: date, price: checkPrice, qty: t.qty }));
           } else if (stopProfitPct && unrealPct >= stopProfitPct) {
-            var t = portfolioExitPosition(pf, checkPrice, date, sellFeeRate, 'stopProfit');
+            var t = portfolioExitPosition(pf, checkPrice, date, shortExitRate, 'stopProfit');
             if (t) trades.push(Object.assign({}, t, { type: 'exit', side: 'short', date: date, price: checkPrice, qty: t.qty }));
           } else if (trailShort !== null && pf.position && checkPrice >= pf.position.trailLow * (1 + trailShort)) {
-            var t = portfolioExitPosition(pf, checkPrice, date, sellFeeRate, 'trailingStop');
+            var t = portfolioExitPosition(pf, checkPrice, date, shortExitRate, 'trailingStop');
             if (t) trades.push(Object.assign({}, t, { type: 'exit', side: 'short', date: date, price: checkPrice, qty: t.qty }));
           }
         }
@@ -940,17 +951,17 @@ var ExecutionEngine = (function() {
               if (pf.position) trades.push({ type: 'entry', side: 'long', date: date, price: execPrice, qty: lots, reason: 'strategy', score: leScore });
             } else if (shortEnabled && seScore >= threshold) {
               var base = posBase === 'equity' ? portfolioEquity(pf) : capital;
-              var lots = lotsFor(base, execPrice, buyFeeRate), cash0 = pf.balance;
-              portfolioEnterShort(pf, lots, execPrice, date, buyFeeRate);
-              logEntry(date, date, 'short', execPrice, lots, cash0, buyFeeRate);
-              if (!pf.position) noteReject(execPrice, buyFeeRate);
+              var lots = lotsFor(base, execPrice, shortEntryRate), cash0 = pf.balance;
+              portfolioEnterShort(pf, lots, execPrice, date, shortEntryRate);
+              logEntry(date, date, 'short', execPrice, lots, cash0, shortEntryRate);
+              if (!pf.position) noteReject(execPrice, shortEntryRate);
               if (pf.position) trades.push({ type: 'entry', side: 'short', date: date, price: execPrice, qty: lots, reason: 'strategy', score: seScore });
             }
           } else if (pf.position.side === 'long' && lxScore >= threshold) {
             var t = portfolioExitPosition(pf, execPrice, date, sellFeeRate, 'strategy');
             if (t) trades.push(Object.assign({}, t, { type: 'exit', side: 'long', date: date, price: execPrice, qty: t.qty }));
           } else if (pf.position.side === 'short' && sxScore >= threshold) {
-            var t = portfolioExitPosition(pf, execPrice, date, sellFeeRate, 'strategy');
+            var t = portfolioExitPosition(pf, execPrice, date, shortExitRate, 'strategy');
             if (t) trades.push(Object.assign({}, t, { type: 'exit', side: 'short', date: date, price: execPrice, qty: t.qty }));
           }
         } else {

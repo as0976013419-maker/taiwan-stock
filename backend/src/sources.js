@@ -314,6 +314,17 @@ async function getSplitMap() {
     return m;
   });
 }
+/** 證交所上市基金（ETF）官方分類：基金類型、是否包含國外成分股、基金名稱（判定漲跌幅限制用；上櫃 ETF 不在此表） */
+async function getEtfClassMap() {
+  return cached("etfclass:twse", 24 * HOUR, async () => {
+    const rows = await fetchJson("https://openapi.twse.com.tw/v1/opendata/t187ap47_L", { timeout: 20000, retries: 1 });
+    if (!Array.isArray(rows) || !rows.length) throw new Error("證交所基金基本資料為空");
+    const m = new Map();
+    for (const r of rows) { const code = String(r["基金代號"] || "").trim(); if (!code) continue;
+      m.set(code, { type: String(r["基金類型"] || "").trim(), foreign: String(r["是否包含國外成分股"] || "").trim(), name: String(r["基金中文名稱"] || "").trim(), asOf: r["出表日期"] || null }); }
+    return m;
+  });
+}
 /** 個股減資參考價（只有在出現「超過漲跌幅限制且查無分割公告」的跳動時才查詢） */
 async function getCapitalReductions(code) {
   return cached(`reduce:${code}`, 24 * HOUR, async () => {
@@ -360,4 +371,4 @@ async function getDisposition() {
   });
 }
 
-module.exports = { demo: false, finmindLimited, getMarketSnapshot, getHistory, getChip, getMargin, getRevenue, getPER, getFinancials, getBalance, getDividends, getHolding, getNews, getIndex, getSplitMap, getCapitalReductions, getQuote, getDisposition };
+module.exports = { demo: false, finmindLimited, getMarketSnapshot, getHistory, getChip, getMargin, getRevenue, getPER, getFinancials, getBalance, getDividends, getHolding, getNews, getIndex, getSplitMap, getEtfClassMap, getCapitalReductions, getQuote, getDisposition };
